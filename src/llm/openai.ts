@@ -5,7 +5,7 @@
 
 import { createModels, createProvider } from "@earendil-works/pi-ai";
 import { stream as piStream, streamSimple as piStreamSimple } from "@earendil-works/pi-ai/api/openai-completions";
-import { ChatMessage, CompletionOptions, CompletionResult, ExtractionInput, LlmProvider } from "./types.js";
+import { ChatMessage, CompletionOptions, CompletionResult, ExtractionInput, ExtractionResult, LlmProvider } from "./types.js";
 import { buildExtractionPrompt } from "../build/prompts.js";
 import { estimateTokens } from "../util.js";
 
@@ -14,6 +14,12 @@ export interface PiAiOptions {
   apiKey: string;
   model: string;
   timeoutMs?: number; // 整个请求（含流式）的超时，毫秒
+  contextWindow?: number; // 模型上下文窗口（tokens），默认 128000，可用 LLM_CONTEXT_WINDOW 覆盖
+  maxTokens?: number;     // 模型单次最大输出（tokens），默认 8192，可用 LLM_MAX_TOKENS 覆盖
+  /** 推理协议（config.llm.thinkingFormat；环境变量 LLM_THINKING_FORMAT 优先） */
+  thinkingFormat?: "auto" | "deepseek" | "zai" | "qwen" | "openrouter" | "openai";
+  /** 抽取时的思考强度（config.llm.extractReasoning；环境变量 LLM_EXTRACT_REASONING 优先） */
+  extractReasoning?: "off" | "low" | "medium" | "high";
 }
 
 interface PiModels {
@@ -21,15 +27,53 @@ interface PiModels {
   model: any;
 }
 
+/** 推理模型协议判定：模型名含 deepseek/Qwen 等 → 强制对应 thinkingFormat，使 reasoning:"off" 真正生效。
+ *  优先级：config.llm.thinkingFormat（经 PiAiProvider.thinkingFormat）> 环境变量 LLM_THINKING_FORMAT > 自动检测。 */
+function deepseekCompat(modelName: string, thinkingFormat: string): Record<string, unknown> {
+  const name = modelName.toLowerCase();
+  const fmt = thinkingFormat.toLowerCase();
+  const isDeepseek = fmt === "deepseek" || (fmt === "auto" && (name.includes("deepseek") || name.includes("ds-")));
+  const isZai = fmt === "zai";
+  const isQwen = fmt === "qwen" || (fmt === "auto" && name.includes("qwen"));
+  if (fmt === "openai") return {};
+  if (isDeepseek) {
+    // deepseek 协议：max_tokens 字段 + reasoning_content 带回传 + thinking 参数
+    return {
+      thinkingFormat: "deepseek",
+      maxTokensField: "max_tokens" as const,
+      requiresReasoningContentOnAssistantMessages: true,
+      supportsReasoningEffort: true,
+    };
+  }
+  if (isZai) return { thinkingFormat: "zai" };
+  if (isQwen) return { thinkingFormat: "qwen" };
+  return {};
+}
+
 export class PiAiProvider implements LlmProvider {
   readonly name = "openai";
   readonly modelName: string;
+  readonly contextWindow: number;
+  readonly maxTokens: number;
   private readonly opts: PiAiOptions;
   private pi: PiModels | null = null;
 
   constructor(opts: PiAiOptions) {
     this.opts = opts;
     this.modelName = opts.model;
+    this.contextWindow = opts.contextWindow ?? envInt("LLM_CONTEXT_WINDOW", 128000);
+    this.maxTokens = opts.maxTokens ?? envInt("LLM_MAX_TOKENS", 8192);
+  }
+
+  /** 推理协议配置：环境变量 LLM_THINKING_FORMAT 优先，其次 config.llm.thinkingFormat，默认 auto */
+  private get thinkingFormat(): string {
+    return process.env.LLM_THINKING_FORMAT?.trim() || this.opts.thinkingFormat || "auto";
+  }
+
+  /** 抽取思考强度：环境变量 LLM_EXTRACT_REASONING 优先，其次 config.llm.extractReasoning，默认 off */
+  private get extractReasoning(): "off" | "low" | "medium" | "high" {
+    const v = process.env.LLM_EXTRACT_REASONING?.trim() || this.opts.extractReasoning || "off";
+    return (["off", "low", "medium", "high"] as const).includes(v as any) ? (v as any) : "off";
   }
 
   private ensure(): PiModels {
@@ -60,9 +104,16 @@ export class PiAiProvider implements LlmProvider {
             reasoning: true,
             input: ["text"] as const,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 128000,
-            maxTokens: 8192,
-            compat: { supportsDeveloperRole: false },
+            contextWindow: this.contextWindow,
+            maxTokens: this.maxTokens,
+            // 自定义端点 + 推理模型的兼容设置：
+            // 自定义 baseUrl 不会被 pi-ai 自动识别为 deepseek，导致 thinkingFormat 走默认分支、
+            // reasoning:"off" 无法真正发送 thinking:{type:"disabled"}（此前输出预算被思考吃光的根因）。
+            // 优先级：config.llm.thinkingFormat > 环境变量 LLM_THINKING_FORMAT > 模型名自动识别。
+            compat: {
+              supportsDeveloperRole: false,
+              ...deepseekCompat(this.modelName, this.thinkingFormat),
+            },
           },
         ],
         api: { stream: piStream, streamSimple: piStreamSimple },
@@ -86,6 +137,9 @@ export class PiAiProvider implements LlmProvider {
     const opts: Record<string, unknown> = {
       temperature: extra?.temperature ?? 0.2,
     };
+    if (extra?.reasoning) {
+      opts.reasoning = extra.reasoning;
+    }
     if (extra?.jsonMode) {
       opts.samplingParams = { response_format: { type: "json_object" } };
     }
@@ -105,9 +159,11 @@ export class PiAiProvider implements LlmProvider {
         }
         const text = contentBlocks(result.content);
         const usage = result.usage ?? {};
+        const cached = (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
         return {
           content: text,
           inputTokens: usage.input ?? estimateTokens(JSON.stringify(messages)),
+          cachedTokens: cached,
           outputTokens: (usage.output ?? 0) + (usage.reasoning ?? 0) || estimateTokens(text),
           model: result.model || this.modelName,
         };
@@ -129,6 +185,7 @@ export class PiAiProvider implements LlmProvider {
     let content = "";
     let inputTokens = 0;
     let outputTokens = 0;
+    let cachedTokens = 0;
     let modelName = this.modelName;
 
     for await (const raw of stream) {
@@ -145,6 +202,7 @@ export class PiAiProvider implements LlmProvider {
         case "usage": {
           inputTokens = ev.input ?? 0;
           outputTokens = (ev.output ?? 0) + (ev.reasoning ?? 0);
+          cachedTokens = (ev.cacheRead ?? 0) + (ev.cacheWrite ?? 0);
           if (ev.model) modelName = ev.model;
           break;
         }
@@ -156,6 +214,7 @@ export class PiAiProvider implements LlmProvider {
             const u = ev.message.usage;
             inputTokens = u.input ?? 0;
             outputTokens = (u.output ?? 0) + (u.reasoning ?? 0);
+            cachedTokens = (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
           }
           if (ev.message?.model) modelName = ev.message.model;
           break;
@@ -169,25 +228,43 @@ export class PiAiProvider implements LlmProvider {
     return {
       content,
       inputTokens: inputTokens || estimateTokens(content),
+      cachedTokens,
       outputTokens: outputTokens || estimateTokens(content),
       model: modelName,
     };
   }
 
-  async extract(input: ExtractionInput): Promise<unknown> {
+  async extract(input: ExtractionInput): Promise<ExtractionResult> {
     const { system, user } = buildExtractionPrompt(input);
+    // 抽取思考强度：config.llm.extractReasoning > 环境变量 LLM_EXTRACT_REASONING，默认 off
+    // （对应协议由 config.llm.thinkingFormat > LLM_THINKING_FORMAT > 模型名自动识别，见 deepseekCompat）
+    const reasoning = this.extractReasoning;
     const result = await this.complete(
       [
         { role: "system", content: system },
         { role: "user", content: user },
       ],
-      { temperature: 0.1, jsonMode: true }
+      { temperature: 0.1, jsonMode: true, reasoning }
     );
     const json = extractJson(result.content);
     if (json === null) {
       throw new Error("模型输出无法解析为 JSON");
     }
-    return json;
+    // 可观测性：真实 usage（input 不含缓存；总输入 = input + cached）
+    const cached = result.cachedTokens ?? 0;
+    return {
+      output: json,
+      usage: {
+        inputTokens: result.inputTokens + cached,
+        cachedTokens: cached,
+        outputTokens: result.outputTokens,
+      },
+    };
+  }
+
+  /** 模型能力（用于 Build 自适应批次大小） */
+  getCapabilities(): { contextWindow: number; maxTokens: number } {
+    return { contextWindow: this.contextWindow, maxTokens: this.maxTokens };
   }
 
   /** Agent 能力：暴露 pi-ai 的 model 与 stream 函数，供 pi-agent-core 的 Agent 循环使用 */
@@ -199,6 +276,14 @@ export class PiAiProvider implements LlmProvider {
         (models.streamSimple as (model: unknown, context: unknown, opts?: Record<string, unknown>) => AsyncIterable<unknown>)(m, context, opts),
     };
   }
+}
+
+/** 从环境变量读取正整数，非法/缺失时回退默认值 */
+function envInt(name: string, fallback: number): number {
+  const v = process.env[name]?.trim();
+  if (!v) return fallback;
+  const n = parseInt(v, 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
 /** 带超时包装：完成后立即清除计时器，避免进程悬挂 */

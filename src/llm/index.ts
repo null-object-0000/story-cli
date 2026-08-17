@@ -17,9 +17,9 @@ export interface LlmSettings {
 export function resolveLlmSettings(cfg: StoryConfig, env = process.env): LlmSettings | null {
   // 支持从项目根 .env 读取（真实环境变量优先，.env 不覆盖）
   loadEnvFile();
-  const baseUrl = env.LLM_BASE_URL?.trim() || (cfg as any).llm?.baseUrl || "";
-  const apiKey = env.LLM_API_KEY?.trim() || (cfg as any).llm?.apiKey || "";
-  const model = env.LLM_MODEL?.trim() || (cfg as any).llm?.model || "";
+  const baseUrl = env.LLM_BASE_URL?.trim() || cfg.llm?.baseUrl || "";
+  const apiKey = env.LLM_API_KEY?.trim() || cfg.llm?.apiKey || "";
+  const model = env.LLM_MODEL?.trim() || cfg.llm?.model || "";
   if (!baseUrl || !apiKey || !model) return null;
   return { baseUrl, apiKey, model };
 }
@@ -32,7 +32,14 @@ export function createProvider(cfg: StoryConfig, override?: "openai" | "mock"): 
   }
   if (settings) {
     return {
-      provider: new PiAiProvider({ baseUrl: settings.baseUrl, apiKey: settings.apiKey, model: settings.model }),
+      provider: new PiAiProvider({
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        // 用户自配置（config.llm 字段；环境变量仍可覆盖，见 PiAiProvider）
+        thinkingFormat: cfg.llm?.thinkingFormat,
+        extractReasoning: cfg.llm?.extractReasoning,
+      }),
       mode: "llm",
     };
   }

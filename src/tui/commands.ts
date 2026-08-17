@@ -3,7 +3,7 @@
 // 命令注册表 SLASH_COMMANDS 同时驱动 pi-tui Editor 的斜杠命令自动补全
 
 import { StoryRepo } from "../db/repo.js";
-import { StoryConfig } from "../config.js";
+import { StoryConfig, resolveLlmPrices, costEstimate } from "../config.js";
 import { LlmProvider } from "../llm/types.js";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { SlashCommand } from "@earendil-works/pi-tui";
@@ -34,7 +34,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "help", description: "显示所有可用命令" },
   { name: "context", description: "查看工作区与会话上下文" },
   { name: "chapter", description: "查看/切换当前阅读进度（Ask 防剧透边界）", argumentHint: "<章节号>" },
-  { name: "build", description: "构建知识库（LLM 抽取）", argumentHint: "[--from N] [--to N] [--force] [--parallel N]" },
+  { name: "build", description: "构建知识库（Agent 化抽取，失败即停）", argumentHint: "[--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]" },
   { name: "import", description: "导入小说文件（会清空现有数据）", argumentHint: "<文件路径>" },
   { name: "validate", description: "完整性校验" },
   { name: "review", description: "审核疑似重复/低置信度数据", argumentHint: "[--auto]" },
@@ -112,7 +112,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           "| `/help` | 显示此帮助 |",
           "| `/context` | 查看工作区与会话上下文 |",
           "| `/chapter <N>` | 切换当前阅读进度（Ask 防剧透边界，默认第 1 章） |",
-          "| `/build [--from N] [--to N] [--force] [--batch-size N] [--parallel N]` | 构建知识库（LLM 抽取，--parallel 并发数） |",
+          "| `/build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]` | 构建知识库（Agent 化抽取：模型自己检索已有实体；--no-agent 回退注入式，--keep-going 失败后继续） |",
           "| `/import <path>` | 导入小说文件（注意：会清空现有数据） |",
           "| `/validate` | 完整性校验 |",
           "| `/review [--auto]` | 审核疑似重复/低置信度数据 |",
@@ -223,22 +223,39 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
               else batchResults.push({ range: p.range, status: p.status });
             }
 
-            const pct = p.totalCount > 0 ? Math.round((p.doneCount / p.totalCount) * 100) : 0;
+            const pct = p.totalChapters > 0 ? Math.round((p.doneChapters / p.totalChapters) * 100) : 0;
             const barWidth = 20;
             const filled = Math.round((pct / 100) * barWidth);
             const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
 
+            // ETA：基于历史真实的抽取速率（字符/秒）推算剩余章节
+            let eta = "";
+            try {
+              const bm = repo.buildMetrics("extract");
+              if (bm.calls > 0 && bm.durationMs > 0 && bm.chapters > 0 && p.totalChapters > p.doneChapters) {
+                const charsPerSec = (bm.chars / bm.durationMs) * 1000;
+                const avgCharsPerChapter = bm.chars / bm.chapters;
+                const remaining = p.totalChapters - p.doneChapters;
+                const etaSec = (remaining * avgCharsPerChapter) / charsPerSec;
+                if (etaSec > 0) eta = `（预计剩余 ${formatDuration(etaSec)}）`;
+              }
+            } catch { /* 指标不可用时静默 */ }
+
             const lines = [`## 🔨 构建中`, ``];
-            if (p.totalCount === 0) {
-              lines.push("无待处理批次（全部已完成？可用 `--force` 强制重跑）");
+            if (p.totalChapters === 0) {
+              lines.push("无待处理章节（全部已完成？可用 `--force` 强制重跑）");
             } else {
-              lines.push(`\`${bar}\` **${pct}%**（${p.doneCount}/${p.totalCount} 批）`);
+              lines.push(`\`${bar}\` **${pct}%**（${p.doneChapters}/${p.totalChapters} 章）${eta}`);
             }
             if (p.failedCount > 0) lines.push(`> ⚠️ ${p.failedCount} 批失败`);
             lines.push("");
             // 正在处理（LLM 调用中）
             if (p.running.length > 0) {
-              lines.push(`**正在处理：** ${p.running.map((r) => `[${r}]`).join(" ")} ⏳`);
+              lines.push(`**正在处理：** ${p.running.map((r) => `[${fmtRange(r)}]`).join(" ")} ⏳`);
+              // 当前批次运行日志（agent 活动：调用工具 / 生成 JSON 等），避免干等
+              if (p.statusLine) {
+                lines.push(`> ${p.statusLine}`);
+              }
               lines.push("");
             }
             // 已完成/失败批次（最近 10 条）
@@ -246,7 +263,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
             if (settled.length > 0) {
               for (const b of settled) {
                 const icon = b.status === "done" ? "✅" : "❌";
-                lines.push(`- ${icon} [${b.range}]`);
+                lines.push(`- ${icon} ${fmtRange(b.range)}`);
               }
               if (settled.length < batchResults.filter((b) => b.status !== "running").length) {
                 lines.push(`... 共 ${batchResults.length} 批`);
@@ -263,9 +280,16 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           fromChapter: typeof flags["--from"] === "number" ? flags["--from"] as number : undefined,
           toChapter: typeof flags["--to"] === "number" ? flags["--to"] as number : undefined,
           force: flags["--force"] === true,
-          batchSize: typeof flags["--batch-size"] === "number" ? flags["--batch-size"] as number : undefined,
+          batchSize: typeof flags["--batch-size"] === "number"
+            ? flags["--batch-size"] as number
+            : (cfg.build?.batchSize ?? undefined),
           maxChapter: cfg.maxChapter,
-          concurrency: typeof flags["--parallel"] === "number" ? flags["--parallel"] as number : undefined,
+          concurrency: 1,
+          autoBatch: flags["--auto-batch"] === true || (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? false)),
+          failFast: !(flags["--keep-going"] === true),
+          agentExtract: (cfg.build?.agentExtract ?? true) === true && flags["--no-agent"] !== true,
+          maxBatchChapters: cfg.build?.maxBatchChapters,
+          perChapterOutputTokens: cfg.build?.perChapterOutputTokens,
           onProgress,
         })
       );
@@ -449,6 +473,35 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
         lines.push("\n> 暂无 LLM 调用记录（尚未执行 build 或 ask）");
       }
 
+      // ── 构建性能（千字速度 / 千字 token / 缓存命中率 / 费用预估）──
+      const bm = repo.buildMetrics("extract");
+      if (bm.calls > 0 && bm.chars > 0) {
+        const charsPerSec = bm.durationMs > 0 ? (bm.chars / bm.durationMs) * 1000 : 0;
+        const cacheHit = bm.inputTokens > 0 ? (bm.inputTokens - bm.inputUncachedTokens) / bm.inputTokens : 0;
+        const cachedTokens = bm.inputTokens - bm.inputUncachedTokens;
+        const price = resolveLlmPrices(cfg);
+        const cost = costEstimate(bm.inputTokens, bm.inputUncachedTokens, bm.outputTokens, price);
+        const kChars = bm.chars / 1000;
+        lines.push("");
+        lines.push("### 抽取性能（逐章/批量）");
+        lines.push("| 指标 | 数值 |");
+        lines.push("|------|------|");
+        lines.push(`| 处理字符 | ${bm.chars.toLocaleString()}（${bm.chapters} 章） |`);
+        lines.push(`| 处理速度 | ${formatSpeed(charsPerSec)} |`);
+        lines.push(`| 输入 token/千字 | ${kChars > 0 ? Math.round(bm.inputTokens / kChars).toLocaleString() : 0}（含缓存） |`);
+        lines.push(`| 纯新增 token/千字 | ${kChars > 0 ? Math.round(bm.inputUncachedTokens / kChars).toLocaleString() : 0}（不含缓存） |`);
+        lines.push(`| 输出 token/千字 | ${kChars > 0 ? Math.round(bm.outputTokens / kChars).toLocaleString() : 0} |`);
+        lines.push(`| 缓存命中率 | ${(cacheHit * 100).toFixed(1)}%（${cachedTokens.toLocaleString()} / ${bm.inputTokens.toLocaleString()}） |`);
+        lines.push(`| 预估费用 | ¥${cost.toFixed(2)} |`);
+        // 整本预计（按当前速率推算剩余章节）
+        if (dbMax > bm.chapters && charsPerSec > 0) {
+          const avgCharsPerChapter = bm.chars / bm.chapters;
+          const remaining = dbMax - bm.chapters;
+          const etaSeconds = (remaining * avgCharsPerChapter) / charsPerSec;
+          lines.push(`> 剩余 ${remaining} 章，按当前速度预计还需 **${formatDuration(etaSeconds)}**`);
+        }
+      }
+
       return { text: lines.join("\n") };
     }
 
@@ -466,6 +519,10 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           if (b.status === "done") doneChapters.add(c);
           else failedChapters.add(c);
         }
+      }
+      // 修正：失败统计不能包含"已被 done 批次覆盖"的章节（如旧 26 章失败批与后来逐章成功批重叠）
+      for (const c of [...failedChapters]) {
+        if (doneChapters.has(c)) failedChapters.delete(c);
       }
       const total = dbMax;
       const done = doneChapters.size;
@@ -521,4 +578,28 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
 /** 命令列表提示（用于未知命令） */
 export function commandHint(): string {
   return "可用命令：`/help`、`/context`、`/chapter`、`/build`、`/import`、`/validate`、`/review`、`/audit`、`/stats`、`/progress`";
+}
+
+/** 批次区间格式化："38-38" → "第 38 章"；"1-26" → "第 1~26 章" */
+function fmtRange(range: string): string {
+  const [a, b] = range.split("-").map(Number);
+  if (Number.isInteger(a) && Number.isInteger(b)) {
+    return a === b ? `第 ${a} 章` : `第 ${a}~${b} 章`;
+  }
+  return range;
+}
+
+/** 处理速度格式化：字符/秒 → "5.2 千字/分钟" 或 "1.3 万字/分钟" */
+function formatSpeed(charsPerSec: number): string {
+  if (!charsPerSec || charsPerSec <= 0) return "—";
+  const perMin = charsPerSec * 60;
+  return perMin >= 10000 ? `${(perMin / 10000).toFixed(1)} 万字/分钟` : `${(perMin / 1000).toFixed(1)} 千字/分钟`;
+}
+
+/** 时长格式化：秒 → "2.3 小时" / "45 分钟" / "30 秒" */
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)} 小时`;
+  if (seconds >= 60) return `${Math.round(seconds / 60)} 分钟`;
+  return `${Math.round(seconds)} 秒`;
 }

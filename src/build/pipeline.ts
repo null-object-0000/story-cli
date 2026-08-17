@@ -5,6 +5,7 @@ import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ChapterSlice, ExtractionInput } from "../llm/types.js";
 import { validateExtractionOutput, ValidationError, ExtractionBundle } from "./validation.js";
 import { aliasClashToDuplicate } from "./resolution.js";
+import { agentExtract, supportsAgentExtract } from "./agent-extractor.js";
 import { log, warn } from "../logger.js";
 import { clampInt, estimateTokens, sleep } from "../util.js";
 
@@ -16,8 +17,27 @@ export interface BuildOptions {
   retries?: number;
   maxChapter: number;
   concurrency?: number;
+  /** 自适应合并：按模型上下文动态决定每批章节数（默认 true，取 cfg.build.autoBatch） */
+  autoBatch?: boolean;
+  /** 单批章节数上限（防单批过大） */
+  maxBatchChapters?: number;
+  /** 每章结构化输出的 token 估算（用于输出预算） */
+  perChapterOutputTokens?: number;
+  /** 模型上下文窗口（tokens）；缺省时尝试 provider.getCapabilities() */
+  contextWindow?: number;
+  /** 模型单次最大输出（tokens） */
+  maxTokens?: number;
   /** 进度回调（每批完成时触发，用于 TUI 实时更新） */
   onProgress?: (progress: BuildProgress) => void;
+  /**
+   * 失败即停：批间存在实体/摘要依赖，某批重试后仍失败时，后续批次不应继续
+   * （后面的抽取会引用缺失的实体，产生悬空引用）。
+   * 默认 true（停止并保留未执行批次）；--keep-going 可显式继续。
+   */
+  failFast?: boolean;
+  /** Agent 化抽取：基于 pi-agent-core 的 Agent + search_existing_entities 工具，
+   *  由模型自己决定检索哪些已有实体（不再全量注入实体清单）。默认 true（受 provider 支持性约束）。 */
+  agentExtract?: boolean;
 }
 
 export interface BuildProgress {
@@ -33,8 +53,14 @@ export interface BuildProgress {
   totalCount: number;
   /** 失败批次数 */
   failedCount: number;
+  /** 已完成章节数（章级进度，按批次跨度累加） */
+  doneChapters: number;
+  /** 待处理总章节数 */
+  totalChapters: number;
   /** 当前正在处理的批次（用于实时显示） */
   running: string[];
+  /** 当前批次运行日志（Agent 活动：调用工具 / 生成 JSON 等），供 UI 实时显示，避免干等 */
+  statusLine?: string;
 }
 
 export interface BatchResult {
@@ -57,7 +83,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   failed: number;
 }> {
   const maxChapter = opts.maxChapter;
-  const batchSize = Math.max(1, opts.batchSize ?? 5);
+  const batchSize = Math.max(1, opts.batchSize ?? 1);
   const retries = Math.max(0, opts.retries ?? 2);
 
   const chapterCount = repo.countChapters();
@@ -68,21 +94,75 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   const toChapter = clampInt(opts.toChapter ?? dbMax, 1, Math.min(dbMax, maxChapter));
   const fromChapter = clampInt(opts.fromChapter ?? 1, 1, toChapter);
 
-  // 生成批次
+  // ── 模型能力与预算（自适应分批用） ──
+  const caps = provider.getCapabilities?.();
+  const contextWindow = Math.max(16000, opts.contextWindow ?? caps?.contextWindow ?? 128000);
+  const maxTokens = Math.max(1024, opts.maxTokens ?? caps?.maxTokens ?? 8192);
+  const autoBatch = opts.autoBatch ?? true;
+  const maxBatchChapters = Math.max(1, opts.maxBatchChapters ?? 60);
+  const perChapterOutput = Math.max(80, opts.perChapterOutputTokens ?? 260);
+  // 固定开销：system prompt + JSON 指令 + 输出外壳 + 实体索引（粗估）
+  const fixedOverhead = 3000;
+  // 输入预算：上下文减去输出预留，留 10% 安全余量
+  const inputBudget = Math.floor((contextWindow - maxTokens) * 0.9 - fixedOverhead);
+  // 输出预算：单批输出不得超出 maxTokens 的 85%（防 JSON 截断）
+  const maxByOutput = Math.max(1, Math.floor((maxTokens * 0.85) / perChapterOutput));
+  const effectiveMaxBatch = Math.min(maxBatchChapters, maxByOutput);
+
+  // 生成批次（固定 or 自适应）
   const ranges: { start: number; end: number }[] = [];
-  for (let s = fromChapter; s <= toChapter; s += batchSize) {
-    ranges.push({ start: s, end: Math.min(s + batchSize - 1, toChapter) });
+  if (!autoBatch) {
+    for (let s = fromChapter; s <= toChapter; s += batchSize) {
+      ranges.push({ start: s, end: Math.min(s + batchSize - 1, toChapter) });
+    }
+  } else {
+    let start = fromChapter;
+    let acc = 0;
+    let n = 0;
+    for (let c = fromChapter; c <= toChapter; c++) {
+      const text = repo.getChapterText(c);
+      const ct = text ? estimateTokens(text) : 0;
+      if (n > 0 && (acc + ct > inputBudget || n >= effectiveMaxBatch)) {
+        ranges.push({ start, end: c - 1 });
+        start = c;
+        acc = 0;
+        n = 0;
+      }
+      acc += ct;
+      n++;
+    }
+    if (n > 0) ranges.push({ start, end: toChapter });
+    if (ranges.length > 0 && ranges[ranges.length - 1].end < toChapter) {
+      ranges[ranges.length - 1] = { ...ranges[ranges.length - 1], end: toChapter };
+    }
+    log(`自适应批量：上下文 ${contextWindow} / 输出 ${maxTokens} → 每批最多 ${effectiveMaxBatch} 章（共 ${ranges.length} 批）`);
   }
 
   // 断点续跑：跳过已完成批次（除非 --force）
   const pending: { start: number; end: number }[] = [];
   let skipped = 0;
+  // 已完成的批次区间（用于"章级覆盖判断"：单章批被任意 done 批次覆盖也算完成）
+  const doneBatches = opts.force ? [] : repo.listBatches().filter((b) => b.status === "done");
+  const chapterCoveredByDone = (c: number): boolean => {
+    for (const b of doneBatches) {
+      const [s, e] = b.range.split("-").map(Number);
+      if (Number.isInteger(s) && Number.isInteger(e) && c >= s && c <= e) return true;
+    }
+    return false;
+  };
   for (const r of ranges) {
     const key = `${r.start}-${r.end}`;
-    const state = repo.getBatch(key);
-    if (!opts.force && state?.status === "done") {
-      skipped++;
-      continue;
+    if (!opts.force) {
+      // 单章批次：若该章已属于某个 done 批次（如旧版 5 章批 "16-20"），跳过避免重复抽取
+      if (r.start === r.end && chapterCoveredByDone(r.start)) {
+        skipped++;
+        continue;
+      }
+      const state = repo.getBatch(key);
+      if (state?.status === "done") {
+        skipped++;
+        continue;
+      }
     }
     pending.push(r);
   }
@@ -93,13 +173,24 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   const processed: BatchResult[] = [];
   let failed = 0;
   let doneCount = 0;
+  let doneChapters = 0;
   const totalBatches = pending.length;
+  const totalChapters = pending.reduce((s, r) => s + (r.end - r.start + 1), 0);
   /** 正在处理的批次（running 状态，实时显示） */
   const running: string[] = [];
   const zeroResult = (range: string, status: "done" | "failed"): BatchResult => ({ range, status, ...zeroCounts() });
-  const emitProgress = (range: string, status: BuildProgress["status"], counts: BatchResult): void => {
-    if (status === "done") doneCount++;
-    else if (status === "failed") failed++;
+  const spanOf = (range: string): number => {
+    const [a, b] = range.split("-").map(Number);
+    return Number.isInteger(a) && Number.isInteger(b) ? b - a + 1 : 0;
+  };
+  const emitProgress = (range: string, status: BuildProgress["status"], counts: BatchResult, statusLine?: string): void => {
+    if (status === "done") {
+      doneCount++;
+      doneChapters += spanOf(range);
+    } else if (status === "failed") {
+      failed++;
+      doneChapters += spanOf(range);
+    }
     opts.onProgress?.({
       range,
       status,
@@ -107,7 +198,10 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       doneCount,
       totalCount: totalBatches,
       failedCount: failed,
+      doneChapters,
+      totalChapters,
       running: [...running],
+      ...(statusLine !== undefined ? { statusLine } : {}),
     });
   };
 
@@ -115,14 +209,23 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   async function processBatch(r: { start: number; end: number }): Promise<void> {
     const key = `${r.start}-${r.end}`;
     running.push(key);
-    emitProgress(key, "running", zeroResult(key, "done"));
+    let statusLine: string | undefined;
+    const bump = (line?: string): void => {
+      if (line !== undefined) statusLine = line;
+      emitProgress(key, "running", zeroResult(key, "done"), statusLine);
+    };
+    emitProgress(key, "running", zeroResult(key, "done"), "准备批次...");
     log(`[${key}] extracting...`);
+    // 批内每章文本预算（输入预算均分；中文 ~0.6~0.7 token/字，保守按 0.6 换算字符）
+    const nChapters = Math.max(1, r.end - r.start + 1);
+    const perChapterTokenBudget = Math.max(600, Math.floor((inputBudget - fixedOverhead) / nChapters));
+    const perChapterCharBudget = Math.floor(perChapterTokenBudget / 0.6);
     const texts: ChapterSlice[] = [];
     for (let c = r.start; c <= r.end; c++) {
       const text = repo.getChapterText(c);
       if (text === null) continue;
       const meta = repo.listChapterMeta().find((m) => m.chapter === c);
-      texts.push({ chapter: c, title: meta?.title ?? "", text });
+      texts.push({ chapter: c, title: meta?.title ?? "", text: text.slice(0, perChapterCharBudget) });
     }
     if (texts.length === 0) {
       warn(`[${key}] 无章节文本，跳过`);
@@ -134,11 +237,11 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       return;
     }
 
-    // 已有实体索引
-    const knownEntities = repo
-      .listEntities()
-      .map((e) => ({ id: e.id, name: e.name, type: e.type }));
-    const aliases = repo.listAliases().map((a) => ({ alias: a.alias, entityId: a.entity_id, entityName: repo.getEntity(a.entity_id)?.name ?? "" }));
+    // 已有实体索引 —— 仅非 agent 抽取的回退路径需要（agent 化抽取由模型自己用工具检索）
+    const agentMode = (opts.agentExtract ?? true) && supportsAgentExtract(provider);
+    const rel = agentMode ? { knownEntities: [], aliases: [] } : buildRelevantContext(repo, texts);
+    const knownEntities = rel.knownEntities;
+    const aliases = rel.aliases;
 
     // 滚动摘要
     const previousSummary = rollPreviousSummary(repo, r.start);
@@ -157,6 +260,8 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     // 调用 + 校验 + 重试
     let bundle: ExtractionBundle | null = null;
     let lastError = "";
+    let usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+    const batchChars = texts.reduce((s, t) => s + t.text.length, 0);
     const t0 = Date.now();
     let attempt = 0;
     for (; attempt <= retries; attempt++) {
@@ -165,8 +270,16 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         await sleep(500 * attempt);
       }
       try {
-        const raw = await provider.extract(input);
-        bundle = validateExtractionOutput(raw, maxChapter);
+        const res = agentMode
+          ? await agentExtract(provider, repo, input, {
+              onActivity: (line) => {
+                statusLine = line;
+                emitProgress(key, "running", zeroResult(key, "done"), statusLine);
+              },
+            })
+          : (bump("等待 LLM 响应（流式生成中）..."), await provider.extract(input));
+        usage = res.usage;
+        bundle = validateExtractionOutput(res.output, maxChapter);
         break;
       } catch (e) {
         lastError = e instanceof Error ? e.message : String(e);
@@ -178,7 +291,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
 
     if (!bundle) {
       warn(`[${key}] 抽取失败（重试 ${retries} 次后放弃）：${lastError}`);
-      repo.addLlmLog({ phase: "extract", model: provider.name, range: key, inputTokens: 0, outputTokens: 0, durationMs, success: false, retries: attempt, error: lastError });
+      repo.addLlmLog({ phase: "extract", model: provider.name, range: key, chars: batchChars, chapters: texts.length, inputTokens: usage.inputTokens, inputUncachedTokens: usage.inputTokens - usage.cachedTokens, outputTokens: usage.outputTokens, durationMs, success: false, retries: attempt, error: lastError });
       repo.markBatch(key, r.start, r.end, "failed", zeroCounts(), null);
       const br: BatchResult = { range: key, status: "failed", ...zeroCounts() };
       processed.push(br);
@@ -262,7 +375,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       repo.db.exec("ROLLBACK");
       const msg = e instanceof Error ? e.message : String(e);
       warn(`[${key}] 入库失败（事务回滚）：${msg}`);
-      repo.addLlmLog({ phase: "extract", model: provider.name, range: key, inputTokens: 0, outputTokens: 0, durationMs, success: false, retries: attempt, error: msg });
+      repo.addLlmLog({ phase: "extract", model: provider.name, range: key, chars: batchChars, chapters: texts.length, inputTokens: usage.inputTokens, inputUncachedTokens: usage.inputTokens - usage.cachedTokens, outputTokens: usage.outputTokens, durationMs, success: false, retries: attempt, error: msg });
       repo.markBatch(key, r.start, r.end, "failed", zeroCounts(), null);
       const br: BatchResult = { range: key, status: "failed", ...zeroCounts() };
       processed.push(br);
@@ -271,9 +384,10 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       return;
     }
 
-    const inputTokens = estimateTokens(JSON.stringify(input));
-    const outputTokens = estimateTokens(JSON.stringify(bundle));
-    repo.addLlmLog({ phase: "extract", model: provider.name, range: key, inputTokens, outputTokens, durationMs, success: true, retries: attempt });
+    const inputTokens = usage.inputTokens;      // 真实 usage（含缓存）
+    const inputUncachedTokens = usage.inputTokens - usage.cachedTokens;
+    const outputTokens = usage.outputTokens;
+    repo.addLlmLog({ phase: "extract", model: provider.name, range: key, chars: batchChars, chapters: texts.length, inputTokens, inputUncachedTokens, outputTokens, durationMs, success: true, retries: attempt });
     repo.markBatch(key, r.start, r.end, "done", counts, bundle.batchSummary);
 
     log(`  new entities: ${counts.newEntities}`);
@@ -292,22 +406,67 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     emitProgress(key, "done", br);
   }
 
-  // 并发执行：最多 N 个 worker 从 pending 队列取任务
-  const concurrency = Math.max(1, opts.concurrency ?? 1);
+  // ── 执行：严格串行（批间存在强依赖，禁止并发） ──
+  // 依赖链：批 N+1 的实体注入（buildRelevantContext）依赖批 N 已入库的实体；
+  //         滚动摘要（rollPreviousSummary）依赖前一批的 batchSummary；
+  //         并行会让后一批看不到前一批刚创建的实体 → 重复建实体、摘要错乱。
+  // 因此并发参数不再生效：批内仍可合并多章（同一 prompt 顺序阅读无依赖问题），
+  // 但批与批之间必须按顺序逐批执行。
+  const requestedConcurrency = Math.max(1, opts.concurrency ?? 1);
+  if (requestedConcurrency > 1) {
+    warn(`[build] 已忽略 --parallel ${requestedConcurrency}：批间存在实体/摘要依赖，必须串行执行以保证正确性。`);
+  }
   if (totalBatches === 0) {
     // 没有待处理批次，也上报一次空进度（UI 立即显示"无待处理"）
-    opts.onProgress?.({ range: "", status: "done", counts: zeroResult("", "done"), doneCount: 0, totalCount: 0, failedCount: 0, running: [] });
+    opts.onProgress?.({ range: "", status: "done", counts: zeroResult("", "done"), doneCount: 0, totalCount: 0, failedCount: 0, doneChapters: 0, totalChapters: 0, running: [] });
   }
-  const queue = [...pending];
-  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
-    while (queue.length > 0) {
-      const r = queue.shift()!;
-      await processBatch(r);
+  // 失败即停（默认）：串行依赖下，某批重试后仍失败 → 后续批次不应继续，
+  // 否则后续抽取会引用缺失实体产生悬空引用。--keep-going 显式允许继续。
+  const failFast = opts.failFast ?? true;
+  for (const r of pending) {
+    await processBatch(r);
+    if (failFast && processed.some((p) => p.status === "failed")) {
+      const failedRange = processed.filter((p) => p.status === "failed").map((p) => p.range).join(", ");
+      const remaining = pending.filter((x) => x !== r);
+      warn(`[build] 批次（${failedRange}）失败后停止：批间存在实体/摘要依赖，未执行后续 ${remaining.length} 个批次（修复后重跑会自动续跑）。`);
+      // 将未执行批次一并上报为"未处理"（status 保持 pending，UI 显示剩余）
+      break;
     }
-  });
-  await Promise.all(workers);
+  }
 
   return { processed, skipped, failed };
+}
+
+/** 收集本批文本中"被提到"的实体及其别名。
+ *  借鉴 Agent 的按需检索思想：不把全部已知实体塞进 prompt（实体多了会占满上下文），
+ *  只注入本批章节文本实际出现的实体，让 LLM 复用它们的 entityId，避免重复建实体。 */
+function buildRelevantContext(repo: StoryRepo, texts: ChapterSlice[]): {
+  knownEntities: { id: string; name: string; type: string }[];
+  aliases: { alias: string; entityId: string; entityName: string }[];
+} {
+  const joined = texts.map((t) => t.text).join("\n");
+  if (!joined) return { knownEntities: [], aliases: [] };
+  const allEntities = repo.listEntities();
+  const allAliases = repo.listAliases();
+  const entityById = new Map(allEntities.map((e) => [e.id, e]));
+  const mentioned = new Map<string, { id: string; name: string; type: string }>();
+  for (const e of allEntities) {
+    if (e.name.length >= 2 && joined.includes(e.name)) {
+      mentioned.set(e.id, { id: e.id, name: e.name, type: e.type });
+    }
+  }
+  for (const a of allAliases) {
+    if (a.alias.length >= 2 && joined.includes(a.alias)) {
+      const e = entityById.get(a.entity_id);
+      if (e) mentioned.set(e.id, { id: e.id, name: e.name, type: e.type });
+    }
+  }
+  return {
+    knownEntities: [...mentioned.values()],
+    aliases: allAliases
+      .filter((a) => mentioned.has(a.entity_id))
+      .map((a) => ({ alias: a.alias, entityId: a.entity_id, entityName: entityById.get(a.entity_id)?.name ?? "" })),
+  };
 }
 
 function zeroCounts() {

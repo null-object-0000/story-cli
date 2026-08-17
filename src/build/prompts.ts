@@ -36,17 +36,28 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
   "possibleDuplicates": [{ "entityA": "...", "entityB": "...", "reason": "..." }],
   "conflicts": [{ "kind": "fact_conflict", "entityName": "...", "detail": "...", "chapterA": 1, "chapterB": 2 }],
   "batchSummary": "2~3句话概括本批章节的剧情进展，供下一批抽取参考。"
-}`;
+}
+
+## 输出精简要求（token 预算敏感，硬性要求，违反会导致成本翻倍）
+1. 文本尽量短：value / detail / summary 一句话内（一般 ≤ 20 字），删掉所有修饰词、原因铺垫和原文复述；不要重复读者已经知道的信息。
+2. 可省略字段（省略即用系统默认值，绝不输出 null 或空串 ""）：
+   - confidence（省略默认 0.8）、importance（省略默认 0.5）、memorability（省略默认 0.7）、protagonistRelevance（省略默认 0.5）
+   - 只在明显偏离默认时才显式给出，其余一律省略。
+3. 数量上限（按本批章节总量控制）：每章 facts ≤ 5 条（同维度事实合并成一条）、events ≤ 3 个、memoryAnchors ≤ 2 条；aliases 只收真正新增且对记忆恢复有用的称呼，杜绝罗列。
+4. 已存在实体（通过工具检索命中的）：只输出【本批新增或变化】的信息——新别名、新关系、能力变化、新经历、身份变化；【绝不重复】其身份、性格、背景等已有内容。
+5. batchSummary 一句话（≤ 40 字），说明本批最重要的剧情推进即可。
+6. 没有内容的字段（如新能力无 system/path/level、事件无 participants）一律省略，不要输出 null / "" / [] 等空壳字段。`;
 
 export function buildExtractionPrompt(input: ExtractionInput): { system: string; user: string } {
   const system = EXTRACTION_SYSTEM_PROMPT.replaceAll(MAX_TOKEN, String(input.maxChapter));
 
   const knownEntities = input.knownEntities
-    .slice(0, 200)
+    .slice(0, 800)
     .map((e) => `${e.id}（${e.name}）`)
     .join("，");
 
   const aliases = input.aliases
+    .slice(0, 2000)
     .map((a) => `${a.alias} → ${a.entityName}`)
     .join("；");
 

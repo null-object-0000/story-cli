@@ -1,6 +1,6 @@
 // story build：分批量 LLM 抽取 + 断点续跑 + 重试 + 成本统计
 
-import { loadConfig, dbPath } from "../config.js";
+import { loadConfig, dbPath, resolveLlmPrices, costEstimate } from "../config.js";
 import { StoryRepo } from "../db/repo.js";
 import { runBuild } from "../build/pipeline.js";
 import { createProvider } from "../llm/index.js";
@@ -26,10 +26,26 @@ export async function cmdBuild(
 
     const fromChapter = parseNum(flags["--from-chapter"]);
     const toChapter = parseNum(flags["--to-chapter"]);
-    const batchSize = parseNum(flags["--batch-size"]) ?? cfg.build?.batchSize ?? 5;
+    const batchSize = parseNum(flags["--batch-size"]) ?? cfg.build?.batchSize ?? 1;
     const retries = parseNum(flags["--retries"]) ?? cfg.build?.retries ?? 2;
     const force = flags["--force"] === true || flags["--force"] === "true";
+    // 串行执行：批间存在实体/摘要依赖，--parallel 不再生效（pipeline 会忽略并警告）
     const concurrency = parseNum(flags["--parallel"]) ?? 1;
+    // 默认逐章抽取（进度按章、依赖最严格）；--auto-batch 或 --batch-size N 合并多个章节
+    const autoBatch = flags["--auto-batch"] === true || flags["--auto-batch"] === "true"
+      ? true
+      : (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? false));
+    if (!autoBatch) {
+      log(`逐章抽取模式：每批 1 章（进度按章显示，前后依赖最严格）`);
+    } else {
+      log(`合并抽取模式已开启：--batch-size ${batchSize} 或按模型上下文自适应合并`);
+    }
+    // 失败即停（默认）：依赖链断裂后不再继续，否则后续实体悬空；--keep-going 显式继续
+    const failFast = !(flags["--keep-going"] === true || flags["--keep-going"] === "true");
+    if (failFast) log(`失败即停已开启：某批重试后仍失败将停止后续批次（--keep-going 可继续）`);
+    // Agent 化抽取（默认开）：模型自己用工具检索已有实体；--no-agent 回退到"注入实体清单"的单轮抽取
+    const agentExtract = cfg.build?.agentExtract ?? true;
+    if (flags["--no-agent"] === true || flags["--no-agent"] === "true") log(`已关闭 Agent 化抽取（--no-agent），回退到注入式单轮抽取`);
 
     const started = Date.now();
     const res = await runBuild(repo, provider, {
@@ -39,6 +55,11 @@ export async function cmdBuild(
       batchSize,
       retries,
       concurrency,
+      autoBatch,
+      failFast,
+      agentExtract,
+      maxBatchChapters: cfg.build?.maxBatchChapters,
+      perChapterOutputTokens: cfg.build?.perChapterOutputTokens,
       maxChapter: cfg.maxChapter,
     });
 
@@ -52,7 +73,24 @@ export async function cmdBuild(
     const chapters = repo.countChapters();
     const dur = ((Date.now() - started) / 1000).toFixed(1);
     log("");
-    log(`Build complete（耗时 ${dur}s）`);
+    log(`Build complete（本次耗时 ${dur}s）`);
+    // ── 可观测性：千字速度 / 千字 token / 缓存命中 / 费用 ──
+    try {
+      const m = repo.buildMetrics("extract");
+      if (m.calls > 0) {
+        const charsPerSec = m.durationMs > 0 ? (m.chars / m.durationMs) * 1000 : 0;
+        const kChars = m.chars / 1000;
+        const inputPerK = kChars > 0 ? Math.round(m.inputTokens / kChars) : 0;
+        const outPerK = kChars > 0 ? Math.round(m.outputTokens / kChars) : 0;
+        const cacheHit = m.inputTokens > 0 ? (m.inputTokens - m.inputUncachedTokens) / m.inputTokens : 0;
+        log(`观测      : ↓ ${formatSpeed(charsPerSec)}  输入 ${inputPerK} tok/千字（缓存命中率 ${(cacheHit * 100).toFixed(1)}%）  输出 ${outPerK} tok/千字`);
+        log(`          输入合计 ${m.inputTokens.toLocaleString()}（缓存 ${(m.inputTokens - m.inputUncachedTokens).toLocaleString()}） 输出 ${m.outputTokens.toLocaleString()}  失败 ${m.failures}`);
+        const price = resolveLlmPrices(cfg);
+        const cost = costEstimate(m.inputTokens, m.inputUncachedTokens, m.outputTokens, price);
+        const cachedTokens = m.inputTokens - m.inputUncachedTokens;
+        log(`费用预估  : ¥${cost.toFixed(2)}（输入 ¥${(price.input / 1000000 * m.inputUncachedTokens).toFixed(2)} + 缓存 ¥${(price.cached / 1000000 * cachedTokens).toFixed(2)} + 输出 ¥${(price.output / 1000000 * m.outputTokens).toFixed(2)}）`);
+      }
+    } catch { /* 指标不可用时静默 */ }
     log(`Chapters      : ${chapters}`);
     log(`Characters    : ${c.characters}`);
     log(`Entities      : ${c.entities}`);
@@ -77,4 +115,11 @@ function parseNum(v: string | boolean | undefined): number | undefined {
   if (typeof v !== "string") return undefined;
   const n = parseInt(v, 10);
   return Number.isInteger(n) ? n : undefined;
+}
+
+/** 处理速度格式化：字符/秒 → "5.2 千字/分钟" 或 "1.3 万字/分钟" */
+function formatSpeed(charsPerSec: number): string {
+  if (!charsPerSec || charsPerSec <= 0) return "—";
+  const perMin = charsPerSec * 60;
+  return perMin >= 10000 ? `${(perMin / 10000).toFixed(1)} 万字/分钟` : `${(perMin / 1000).toFixed(1)} 千字/分钟`;
 }

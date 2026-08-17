@@ -128,6 +128,22 @@ export class StoryRepo {
     this.userChapterBound = maxChapter;
     this.db.exec(SCHEMA_SQL({ maxChapter, book: "" }));
     verifySchemaMax(this.db, maxChapter);
+    this.ensureLlmLogColumns();
+  }
+
+  /** 旧库迁移：llm_logs 新增列（chars/chapters/input_uncached_tokens） */
+  private ensureLlmLogColumns(): void {
+    try {
+      const cols = (this.db.prepare("PRAGMA table_info(llm_logs)").all() as { name: string }[]).map((c) => c.name);
+      const added: string[] = [];
+      if (!cols.includes("chars")) this.db.exec("ALTER TABLE llm_logs ADD COLUMN chars INTEGER NOT NULL DEFAULT 0");
+      if (!cols.includes("chapters")) this.db.exec("ALTER TABLE llm_logs ADD COLUMN chapters INTEGER NOT NULL DEFAULT 0");
+      if (!cols.includes("input_uncached_tokens")) this.db.exec("ALTER TABLE llm_logs ADD COLUMN input_uncached_tokens INTEGER NOT NULL DEFAULT 0");
+      // 历史行回填（幂等）：无缓存数据的旧行，纯新增输入 = 总输入（缓存命中率按 0 计）
+      this.db.exec("UPDATE llm_logs SET input_uncached_tokens = input_tokens WHERE input_uncached_tokens = 0 AND input_tokens > 0");
+    } catch {
+      // 表不存在时忽略（schema 会创建）
+    }
   }
 
   /** 设置 Ask 阅读进度边界（1..maxChapter）。之后所有读方法只返回 chapter <= userChapter 的数据。 */
@@ -481,7 +497,10 @@ export class StoryRepo {
     phase: string;
     model: string | null;
     range: string | null;
+    chars?: number;
+    chapters?: number;
     inputTokens: number;
+    inputUncachedTokens?: number;
     outputTokens: number;
     durationMs: number;
     success: boolean;
@@ -490,13 +509,16 @@ export class StoryRepo {
   }): void {
     this.db
       .prepare(
-        "INSERT INTO llm_logs(phase,model,range,input_tokens,output_tokens,duration_ms,success,retries,error) VALUES(?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO llm_logs(phase,model,range,chars,chapters,input_tokens,input_uncached_tokens,output_tokens,duration_ms,success,retries,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
       )
       .run(
         row.phase,
         row.model ?? null,
         row.range ?? null,
+        row.chars ?? 0,
+        row.chapters ?? 0,
         row.inputTokens,
+        row.inputUncachedTokens ?? row.inputTokens,
         row.outputTokens,
         row.durationMs,
         row.success ? 1 : 0,
@@ -513,6 +535,44 @@ export class StoryRepo {
          FROM llm_logs`
       )
       .get() as { calls: number; input: number; output: number; retries: number; duration: number; failures: number };
+    return r;
+  }
+
+  /** Build（extract）性能指标：千字处理速度、千字 token 消耗、缓存命中率（可观测性）。
+   *  默认只统计最近 100 条成功记录（最近窗口），避免历史慢速数据/旧模型拖偏当前速率预估。 */
+  buildMetrics(phase = "extract", recentCalls = 100): {
+    calls: number;
+    chapters: number;
+    chars: number;
+    durationMs: number;
+    inputTokens: number;
+    inputUncachedTokens: number;
+    outputTokens: number;
+    failures: number;
+  } {
+    const r = this.db
+      .prepare(
+        `WITH recent AS (
+           SELECT chars, chapters, input_tokens, input_uncached_tokens, output_tokens, duration_ms, success
+           FROM llm_logs WHERE phase=? AND success=1 AND chars>0
+           ORDER BY id DESC LIMIT ?
+         )
+         SELECT COUNT(*) AS calls, COALESCE(SUM(chapters),0) AS chapters, COALESCE(SUM(chars),0) AS chars,
+                COALESCE(SUM(input_tokens),0) AS inputTokens, COALESCE(SUM(input_uncached_tokens),0) AS inputUncachedTokens,
+                COALESCE(SUM(output_tokens),0) AS outputTokens, COALESCE(SUM(duration_ms),0) AS durationMs,
+                COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),0) AS failures
+         FROM recent`
+      )
+      .get(phase, recentCalls) as {
+      calls: number;
+      chapters: number;
+      chars: number;
+      inputTokens: number;
+      inputUncachedTokens: number;
+      outputTokens: number;
+      durationMs: number;
+      failures: number;
+    };
     return r;
   }
 

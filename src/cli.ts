@@ -63,7 +63,7 @@ const commands: Record<string, CommandEntry> = {
       const { cmdBuild } = await import("./cmd/build.js");
       return cmdBuild(args.flags, args.positional);
     },
-    help: "story build [--from N] [--to N] [--force] [--batch-size N] [--parallel N] [--provider openai|mock] [--retries N]  抽取结构化数据",
+    help: "story build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going] [--provider openai|mock] [--retries N]  抽取结构化数据（Agent 化抽取，失败即停）",
   },
   review: {
     run: async (args) => {

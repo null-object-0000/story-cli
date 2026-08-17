@@ -142,7 +142,10 @@ CREATE TABLE IF NOT EXISTS llm_logs (
   phase        TEXT NOT NULL,          -- 'extract' | 'ask' | 'other'
   model        TEXT,
   range        TEXT,                   -- 例如 "1-5"
-  input_tokens INTEGER NOT NULL DEFAULT 0,
+  chars        INTEGER NOT NULL DEFAULT 0,     -- 批内总字符数（千字速度/千字 token）
+  chapters     INTEGER NOT NULL DEFAULT 0,     -- 批内章数
+  input_tokens INTEGER NOT NULL DEFAULT 0,     -- 总输入（含缓存命中）
+  input_uncached_tokens INTEGER NOT NULL DEFAULT 0, -- 纯新增输入（不含缓存）
   output_tokens INTEGER NOT NULL DEFAULT 0,
   duration_ms  INTEGER NOT NULL DEFAULT 0,
   success      INTEGER NOT NULL DEFAULT 1,

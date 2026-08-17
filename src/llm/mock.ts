@@ -4,7 +4,8 @@
 //   2. 端到端测试（防剧透、断点续跑、查询等）。
 // 它只“看懂” mockkb 中定义的事实句（由合成小说写入对应章节），是真实 LLM 抽取的理想化替身。
 
-import { ExtractionInput, LlmProvider } from "./types.js";
+import { ExtractionInput, ExtractionResult, LlmProvider } from "./types.js";
+import { estimateTokens } from "../util.js";
 import {
   MOCK_ABILITIES,
   MOCK_ANCHORS,
@@ -22,7 +23,7 @@ function mentions(text: string, keyword: string): boolean {
 export class MockProvider implements LlmProvider {
   readonly name = "mock";
 
-  async extract(input: ExtractionInput): Promise<unknown> {
+  async extract(input: ExtractionInput): Promise<ExtractionResult> {
     const { texts, startChapter, endChapter } = input;
     const all = texts.map((t) => ({ chapter: t.chapter, text: t.title + "\n" + t.text }));
 
@@ -157,16 +158,24 @@ export class MockProvider implements LlmProvider {
     for (const a of all) for (const n of present[a.chapter] ?? []) batchNames.add(n);
 
     return {
-      newEntities,
-      aliases,
-      facts,
-      relations,
-      abilities,
-      events,
-      memoryAnchors,
-      possibleDuplicates,
-      conflicts: [],
-      batchSummary: `第${startChapter}-${endChapter}章：${batchNames.size ? [...batchNames].join("、") : "过渡"}等人物登场。`,
+      output: {
+        newEntities,
+        aliases,
+        facts,
+        relations,
+        abilities,
+        events,
+        memoryAnchors,
+        possibleDuplicates,
+        conflicts: [],
+        batchSummary: `第${startChapter}-${endChapter}章：${batchNames.size ? [...batchNames].join("、") : "过渡"}等人物登场。`,
+      },
+      // mock 的可观测性：估算 usage（无真实缓存）
+      usage: {
+        inputTokens: estimateTokens(JSON.stringify(input)),
+        cachedTokens: 0,
+        outputTokens: estimateTokens(JSON.stringify({ newEntities, aliases, facts, relations, abilities, events, memoryAnchors })),
+      },
     };
   }
 
