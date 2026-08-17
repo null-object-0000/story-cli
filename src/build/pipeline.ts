@@ -6,6 +6,7 @@ import { LlmProvider, ChapterSlice, ExtractionInput } from "../llm/types.js";
 import { validateExtractionOutput, ValidationError, ExtractionBundle } from "./validation.js";
 import { aliasClashToDuplicate } from "./resolution.js";
 import { agentExtract, supportsAgentExtract } from "./agent-extractor.js";
+import { BuildSessionLogger } from "./session-log.js";
 import { log, warn } from "../logger.js";
 import { clampInt, estimateTokens, sleep } from "../util.js";
 
@@ -38,6 +39,9 @@ export interface BuildOptions {
   /** Agent 化抽取：基于 pi-agent-core 的 Agent + search_existing_entities 工具，
    *  由模型自己决定检索哪些已有实体（不再全量注入实体清单）。默认 true（受 provider 支持性约束）。 */
   agentExtract?: boolean;
+  /** 会话日志：每批把完整 prompt/回复/工具轨迹落盘为 JSONL（.story/logs/build/），
+   *  供性能与准确度分析。默认 true（agent 抽取时生效）。 */
+  sessionLog?: boolean;
 }
 
 export interface BuildProgress {
@@ -141,25 +145,35 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   // 断点续跑：跳过已完成批次（除非 --force）
   const pending: { start: number; end: number }[] = [];
   let skipped = 0;
-  // 已完成的批次区间（用于"章级覆盖判断"：单章批被任意 done 批次覆盖也算完成）
-  const doneBatches = opts.force ? [] : repo.listBatches().filter((b) => b.status === "done");
-  const chapterCoveredByDone = (c: number): boolean => {
-    for (const b of doneBatches) {
+  // 章级覆盖判断：某章是否已被"任意" done 批次覆盖（兼容批次大小变化——如 5 章批变 10 章批后
+  // 精确 range 对不上，但按章算这些章节早已构建过，不该重复抽取）。
+  const coveredChapters = new Set<number>();
+  if (!opts.force) {
+    for (const b of repo.listBatches().filter((bb) => bb.status === "done")) {
       const [s, e] = b.range.split("-").map(Number);
-      if (Number.isInteger(s) && Number.isInteger(e) && c >= s && c <= e) return true;
+      if (Number.isInteger(s) && Number.isInteger(e)) {
+        for (let c = s; c <= e; c++) coveredChapters.add(c);
+      }
     }
-    return false;
-  };
+  }
+  const chapterCoveredByDone = (c: number): boolean => coveredChapters.has(c);
   for (const r of ranges) {
     const key = `${r.start}-${r.end}`;
     if (!opts.force) {
-      // 单章批次：若该章已属于某个 done 批次（如旧版 5 章批 "16-20"），跳过避免重复抽取
-      if (r.start === r.end && chapterCoveredByDone(r.start)) {
+      const state = repo.getBatch(key);
+      if (state?.status === "done") {
         skipped++;
         continue;
       }
-      const state = repo.getBatch(key);
-      if (state?.status === "done") {
+      // 本批每一章都已被任意 done 批次覆盖 → 整批跳过（部分覆盖的批次整批重做，避免复杂的部分续跑）
+      let allCovered = true;
+      for (let c = r.start; c <= r.end; c++) {
+        if (!chapterCoveredByDone(c)) {
+          allCovered = false;
+          break;
+        }
+      }
+      if (allCovered) {
         skipped++;
         continue;
       }
@@ -243,6 +257,15 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     const knownEntities = rel.knownEntities;
     const aliases = rel.aliases;
 
+    // 会话日志：agent 抽取时把本批完整轨迹落盘（.story/logs/build/）
+    let batchSessionLog: BuildSessionLogger | null = null;
+    if (agentMode && (opts.sessionLog ?? true)) {
+      batchSessionLog = new BuildSessionLogger(process.cwd());
+      batchSessionLog.open(key);
+    }
+    // agentExtract 的 sessionLog 参数只接受可选对象
+    const sessionLogForAgent = batchSessionLog ?? undefined;
+
     // 滚动摘要
     const previousSummary = rollPreviousSummary(repo, r.start);
 
@@ -276,10 +299,27 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
                 statusLine = line;
                 emitProgress(key, "running", zeroResult(key, "done"), statusLine);
               },
+              sessionLog: sessionLogForAgent,
             })
           : (bump("等待 LLM 响应（流式生成中）..."), await provider.extract(input));
         usage = res.usage;
         bundle = validateExtractionOutput(res.output, maxChapter);
+        // 校验通过：记录结构化产出统计（准确度分析用）
+        batchSessionLog?.write({
+          t: "validated", range: key,
+          ok: true,
+          counts: {
+            newEntities: bundle.newEntities.length,
+            aliases: bundle.aliases.length,
+            facts: bundle.facts.length,
+            relations: bundle.relations.length,
+            abilities: bundle.abilities.length,
+            events: bundle.events.length,
+            memoryAnchors: bundle.memoryAnchors.length,
+            possibleDuplicates: bundle.possibleDuplicates.length,
+          },
+          batchSummary: bundle.batchSummary,
+        });
         break;
       } catch (e) {
         lastError = e instanceof Error ? e.message : String(e);

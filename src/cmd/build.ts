@@ -58,6 +58,7 @@ export async function cmdBuild(
       autoBatch,
       failFast,
       agentExtract,
+      sessionLog: cfg.build?.sessionLog ?? true,
       maxBatchChapters: cfg.build?.maxBatchChapters,
       perChapterOutputTokens: cfg.build?.perChapterOutputTokens,
       maxChapter: cfg.maxChapter,

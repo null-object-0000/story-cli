@@ -182,6 +182,9 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    // 记录历史：↑/↓ 可在输入框浏览之前提交的命令/问题（Editor 原生支持）
+    editor.addToHistory(trimmed);
+
     busy = true;
 
     // 用户消息

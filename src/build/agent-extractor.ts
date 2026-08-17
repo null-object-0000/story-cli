@@ -13,8 +13,14 @@ import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ExtractionInput, ExtractionResult } from "../llm/types.js";
 import { extractJson } from "../llm/openai.js";
 import { EXTRACTION_SYSTEM_PROMPT } from "./prompts.js";
+import type { BuildSessionLogger } from "./session-log.js";
 import type { NovelTool } from "../agent/tools.js";
 import { log, warn } from "../logger.js";
+
+/** 从 pi-ai 的 content 块（thinking + text）中提取纯文本（会话日志用） */
+function contentBlocks(blocks: { type: string; text?: string }[]): string {
+  return (blocks ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
+}
 
 /** 工具调用轮数上限（1 次批量检索 + 最终输出足够；防止模型循环刷工具） */
 const MAX_TOOL_TURNS = 4;
@@ -29,7 +35,11 @@ export async function agentExtract(
   provider: LlmProvider,
   repo: StoryRepo,
   input: ExtractionInput,
-  callbacks?: { onActivity?: (line: string) => void }
+  callbacks?: {
+    onActivity?: (line: string) => void;
+    /** 会话日志器：记录每个 turn/工具调用的完整轨迹（性能与准确度分析用） */
+    sessionLog?: import("./session-log.js").BuildSessionLogger;
+  }
 ): Promise<ExtractionResult> {
   const kit = provider.getAgentKit?.();
   if (!kit) {
@@ -37,6 +47,7 @@ export async function agentExtract(
   }
   const { model, streamFn } = kit;
   const onActivity = callbacks?.onActivity;
+  const sessionLog = callbacks?.sessionLog;
 
   const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT.replaceAll("__MAX_CHAPTER__", String(input.maxChapter))}
 
@@ -131,6 +142,8 @@ ${chapters}
   let outputTokens = 0;
   let generatedChars = 0;
   let textStarted = false;
+  let turnCount = 0;
+  let toolStartAt = 0;
   agent.subscribe((event: any) => {
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       finalText += event.assistantMessageEvent.delta ?? "";
@@ -145,7 +158,12 @@ ${chapters}
     }
     if (event.type === "tool_execution_start") {
       const args = JSON.stringify(event.args ?? {});
+      toolStartAt = Date.now();
       onActivity?.(`调用工具 ${event.toolName}(${args.slice(0, 120)}...)`);
+      sessionLog?.write({
+        t: "tool_call_start", range: input.range,
+        tool: event.toolName, args: event.args ?? {}, turn: turnCount,
+      });
     }
     if (event.type === "tool_execution_end") {
       const isError = (event as any).isError;
@@ -153,6 +171,13 @@ ${chapters}
         ? "执行失败"
         : `完成（命中 ${((event.result as any)?.details?.count ?? "?")} 个实体）`;
       onActivity?.(`工具 ${event.toolName} ${summary}`);
+      const resultText = (event.result as any)?.content?.[0]?.text;
+      sessionLog?.write({
+        t: "tool_call_end", range: input.range,
+        tool: event.toolName, error: isError ?? false,
+        result: typeof resultText === "string" ? resultText.slice(0, 2000) : resultText,
+        durationMs: Date.now() - toolStartAt, turn: turnCount,
+      });
     }
     if (event.type === "agent_end") {
       onActivity?.("Agent 完成，正在解析结构化结果...");
@@ -160,6 +185,16 @@ ${chapters}
     if (event.type === "message_end" && event.message) {
       const msg = event.message as any;
       const u = msg.usage;
+      const turnInput = (u?.input ?? 0) + (u?.cacheRead ?? 0) + (u?.cacheWrite ?? 0);
+      const turnOutput = (u?.output ?? 0) + (u?.reasoning ?? 0);
+      const msgText = contentBlocks(msg.content ?? []) || finalText;
+      sessionLog?.write({
+        t: "llm_turn", range: input.range, turn: turnCount++,
+        role: msg.role ?? "assistant",
+        content: msgText.slice(0, 60000),
+        usage: u ? { input: turnInput, cached: (u?.cacheRead ?? 0) + (u?.cacheWrite ?? 0), output: turnOutput, raw: u } : undefined,
+        stopReason: msg.stopReason ?? undefined,
+      });
       if (u) {
         inputTokens += (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
         cachedTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
@@ -171,23 +206,50 @@ ${chapters}
     }
   });
 
-  await agent.prompt(userMessage);
+  sessionLog?.write({
+    t: "extract_start", range: input.range,
+    startChapter: input.startChapter, endChapter: input.endChapter,
+    chapterCount: input.texts.length,
+    chars: input.texts.reduce((s, x) => s + x.text.length, 0),
+    maxChapter: input.maxChapter,
+  });
+  sessionLog?.write({ t: "prompt", range: input.range, system: systemPrompt, user: userMessage });
 
-  const json = extractJson(finalText);
-  if (json === null) {
-    throw new Error("Agent 输出无法解析为 JSON");
+  const tExtract = Date.now();
+  try {
+    await agent.prompt(userMessage);
+
+    const json = extractJson(finalText);
+    if (json === null) {
+      throw new Error("Agent 输出无法解析为 JSON");
+    }
+    if (toolCallCounter.count > 0) {
+      log(`  [${input.range}] agent 工具调用 ${toolCallCounter.count} 次（search_existing_entities）`);
+    }
+    sessionLog?.write({
+      t: "extract_end", range: input.range, status: "ok",
+      turns: turnCount, toolCalls: toolCallCounter.count,
+      durationMs: Date.now() - tExtract,
+      usage: { inputTokens, cachedTokens, outputTokens },
+    });
+    return {
+      output: json,
+      usage: {
+        inputTokens: inputTokens || 0,
+        cachedTokens: cachedTokens || 0,
+        outputTokens: outputTokens || 0,
+      },
+    };
+  } catch (e) {
+    sessionLog?.write({
+      t: "extract_end", range: input.range, status: "error",
+      turns: turnCount, toolCalls: toolCallCounter.count,
+      durationMs: Date.now() - tExtract,
+      usage: { inputTokens, cachedTokens, outputTokens },
+      error: e instanceof Error ? e.message : String(e),
+    });
+    throw e;
   }
-  if (toolCallCounter.count > 0) {
-    log(`  [${input.range}] agent 工具调用 ${toolCallCounter.count} 次（search_existing_entities）`);
-  }
-  return {
-    output: json,
-    usage: {
-      inputTokens: inputTokens || 0,
-      cachedTokens: cachedTokens || 0,
-      outputTokens: outputTokens || 0,
-    },
-  };
 }
 
 /** 某 provider 是否支持 Agent 化抽取 */

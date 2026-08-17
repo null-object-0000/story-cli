@@ -288,6 +288,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           autoBatch: flags["--auto-batch"] === true || (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? false)),
           failFast: !(flags["--keep-going"] === true),
           agentExtract: (cfg.build?.agentExtract ?? true) === true && flags["--no-agent"] !== true,
+          sessionLog: cfg.build?.sessionLog ?? true,
           maxBatchChapters: cfg.build?.maxBatchChapters,
           perChapterOutputTokens: cfg.build?.perChapterOutputTokens,
           onProgress,

@@ -28,6 +28,7 @@ export interface StoryConfig {
     perChapterOutputTokens?: number; // 每章结构化输出的 token 估算（用于输出预算，默认 260）
     maxBatchChapters?: number;       // 单批章节数上限（防单批过大，默认 60）
     agentExtract?: boolean;  // Agent 化抽取：模型自己用工具检索已有实体（默认 true；false 回退"注入实体清单"）
+    sessionLog?: boolean;     // 会话日志：每批完整 prompt/回复/工具轨迹落盘 .story/logs/build/（默认 true）
   };
 }
 
