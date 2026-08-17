@@ -1,0 +1,34 @@
+{
+  "name": "story-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "长篇小说结构化知识 + 无剧透问答 CLI（Agent 驱动）",
+  "type": "module",
+  "bin": {
+    "story": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "fixture": "tsc -p tsconfig.json && node dist/scripts/make-fixture.js",
+    "e2e": "tsc -p tsconfig.json && node dist/scripts/e2e.js",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.2",
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
+    "sqlite3": "^6.0.1"
+  },
+  "allowScripts": {
+    "sqlite3@6.0.1": true,
+    "@google/genai@1.52.0": true,
+    "protobufjs@7.6.5": true
+  }
+}

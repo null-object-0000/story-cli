@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.story/
+test/.e2e/
+assets/*.txt
+*.log
+.env
