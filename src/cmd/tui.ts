@@ -1,15 +1,28 @@
 // story tui：交互式小说问答界面（基于 pi-tui + pi-agent）
 
-import { loadConfig, dbPath } from "../config.js";
+import { existsSync } from "node:fs";
+import { loadConfig, dbPath, configPath, type StoryConfig } from "../config.js";
 import { StoryRepo } from "../db/repo.js";
 import { createProvider } from "../llm/index.js";
-import { createStoryAgent } from "../agent/agent.js";
+import { createStoryAgent, createOfflineAgent } from "../agent/agent.js";
 import { NovelToolContext } from "../agent/tools.js";
 import { runTuiApp } from "../tui/app.js";
-import { warn, log } from "../logger.js";
+import { confirmInit } from "../prompt.js";
+import { initializeProject, logInitSummary } from "./init.js";
+import { warn } from "../logger.js";
 
 export async function cmdTui(flags: Record<string, string | boolean>): Promise<number> {
-  const cfg = loadConfig();
+  // 未初始化时不再直接报错：询问是否初始化，选「退出」则干净退出
+  let cfg: StoryConfig;
+  if (!existsSync(configPath())) {
+    const ok = await confirmInit();
+    if (!ok) return 0;
+    cfg = initializeProject({});
+    logInitSummary(cfg);
+  } else {
+    cfg = loadConfig();
+  }
+
   const repo = new StoryRepo(dbPath(), cfg.maxChapter);
 
   try {
@@ -19,17 +32,10 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
     }
 
     const { provider, mode } = createProvider(cfg, providerFlag as any | undefined);
-    if (mode === "mock") {
-      warn("TUI 模式需要真实 LLM（配置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL），当前为离线模式。");
-      warn("TUI 界面将启动，但 Agent 无法使用，请先配置 LLM 环境变量。");
-      // 尝试继续 — agent 创建时会失败
-    }
-
-    const kit = provider.getAgentKit?.();
-    if (!kit) {
-      log("当前 provider 不支持 Agent 模式。TUI 需要真实 LLM（openai-compatible）。");
-      log("请设置 LLM_BASE_URL、LLM_API_KEY、LLM_MODEL 环境变量。");
-      return 1;
+    const offline = mode === "mock";
+    if (offline) {
+      warn("未检测到真实 LLM（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL），以离线模式启动 TUI：");
+      warn("  Agent 问答不可用；/stats、/context、/chapter 等命令照常可用，配置 LLM 后重启获得完整问答。");
     }
 
     const toolCtx: NovelToolContext = {
@@ -40,7 +46,17 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
       focus: { from: null, to: null },
     };
 
-    const agent = createStoryAgent(kit.model, kit.streamFn, repo, cfg, toolCtx);
+    // 有真实 LLM（getAgentKit）→ 正常 Agent；否则用离线 Agent 也能进入 TUI
+    const kit = provider.getAgentKit?.();
+    const agent = kit ? createStoryAgent(kit.model, kit.streamFn, repo, cfg, toolCtx) : createOfflineAgent(repo, cfg, toolCtx);
+
+    const offlineWelcome = [
+      "当前为离线（mock）模式，未配置真实 LLM。",
+      "",
+      "可先用不依赖 LLM 的命令浏览数据：`/stats`、`/context`、`/chapter <N>`、`/progress`、`/validate`、`/review`、`/audit`、`/help`。",
+      "",
+      "启用 Agent 问答：在项目根目录配置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL（可写 .env），然后重启 story tui。",
+    ].join("\n");
 
     await runTuiApp({
       agent,
@@ -49,6 +65,7 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
       provider,
       focus: toolCtx.focus,
       toolCtx,
+      welcomeMessage: offline ? offlineWelcome : undefined,
     });
 
     return 0;
