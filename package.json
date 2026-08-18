@@ -9,9 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "fixture": "tsc -p tsconfig.json && node dist/scripts/make-fixture.js",
-    "e2e": "tsc -p tsconfig.json && node dist/scripts/e2e.js",
-    "dev": "tsc -p tsconfig.json --watch"
+    "dev": "npm run build && node dist/src/cli.js tui"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

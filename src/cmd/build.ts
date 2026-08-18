@@ -65,7 +65,7 @@ export async function cmdBuild(
 
     section("Build 结果");
     for (const b of res.processed) {
-      log(`[${b.range}] ${b.status === "done" ? "done" : "FAILED"}  entities:+${b.newEntities} u:${b.entityUpdates} aliases:${b.aliases} facts:${b.facts} relations:${b.relations} abilities:${b.abilities} events:${b.events} anchors:${b.memoryAnchors} dup:${b.duplicates}`);
+      log(`[${b.range}] ${b.status === "done" ? "done" : "FAILED"}  entities:+${b.newEntities} u:${b.entityUpdates} aliases:${b.aliases} facts:${b.facts} relations:${b.relations} abilities:${b.abilities} events:${b.events} anchors:${b.memoryAnchors} dup:${b.duplicates}${b.error ? `  error: ${b.error}` : ""}`);
     }
     if (res.failed > 0) warn(`${res.failed} 个批次失败（可用 story build --force 重跑失败区间）`);
 

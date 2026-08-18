@@ -34,8 +34,7 @@ story.cmd ask "陈伶到现在有哪些技能？"
 story.cmd ask "心蟒是谁的能力？陈伶什么时候得到的？"
 story.cmd ask "陈伶和闻人佑是什么关系？"
 story.cmd ask "闻人佑最喜欢什么颜色？"   # 结构数据不足 → 明确回答“不足以可靠回答”
-story.cmd character 闻人佑
-story.cmd stats
+story.cmd stats                           # 数据统计 + 完整性校验（原 validate 已并入）
 story.cmd audit --chapter 405           # Reader 可见性审计
 ```
 
@@ -70,6 +69,8 @@ LLM_MODEL=deepseek-chat
 
 > 未来可直接换用 pi-ai 的官方提供商工厂（如 DeepSeek/Qwen），只需改一行 provider 注册代码，`LlmProvider` 抽象层无需变动。
 
+> 💡 **TUI 内可直接配置，无需手动改文件**：输入 `/config llm` 查看 LLM 配置组，用 `/config llm.model=deepseek-chat`、`/config llm.baseUrl=...`、`/config llm.apiKey=...` 修改并保存（LLM / 构建配置保存后需重启 `story tui` 生效；`/config` 还按组管理 build / reader 配置）。
+
 ### 2.2 完整工作流（真实小说）
 
 ```bash
@@ -77,7 +78,7 @@ story init --book "我不是戏神"
 story import "./我不是戏神.txt"    # 导入整本识别到的所有章节（availableThrough 自动决定）
 story build                        # 默认构建“已导入但尚未构建”的全部章节
 story review                       # 人工确认疑似重复人物 / 低置信度事实 / 冲突
-story validate                     # 完整性校验
+story stats                        # 数据/成本/构建性能 + 完整性校验（原 validate 已并入）
 story tui                          # 交互式界面；用 /chapter 405 设置自己的阅读进度
 story ask "闻人佑是谁来着？" --chapter 405
 story audit --chapter 405          # Reader 可见性审计
@@ -87,7 +88,7 @@ story audit --chapter 405          # Reader 可见性审计
 
 - **import 不再物理截断**：`story import novel.txt` 导入整本文件识别到的所有章节。例：识别 1291 章 → `availableThrough = 1291`。
 - **`--to-chapter` 只存在于 `story build`**：它是【本次构建任务的结束章节】（`story build --from 300 --to 400`），与 Reader 防剧透完全无关。
-- **userChapter 是 Reader 唯一的无剧透边界**：Ask / TUI / character 只返回 `chapter <= userChapter` 的结构化数据。默认 `userChapter = 1`（保守），用户用 `/chapter 405` 或 `story ask --chapter 405` 设置自己的进度。
+- **userChapter 是 Reader 唯一的无剧透边界**：Ask / TUI 只返回 `chapter <= userChapter` 的结构化数据。默认 `userChapter = 1`（保守），用户用 `/chapter 405` 或 `story ask --chapter 405` 设置自己的进度。
 - **断点续跑 / 成本统计 / 会话日志**均保留：`story build` 中断后重跑自动跳过已完成批次；每批完整 prompt/回复/工具轨迹落在 `.story/logs/build/`。
 
 ---
@@ -218,12 +219,10 @@ story init [--book 书名] [--user-chapter N]   创建项目（默认 userChapte
 story import <文件>                           导入整本小说（识别到的所有章节；availableThrough 自动决定）
 story build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going] [--provider openai|mock] [--retries N]
 story review [--auto]                         人工审核：合并/改名/拒绝疑似重复、低置信度事实、冲突
-story validate                                完整性校验（引用完整性；不校验章节上限）
-story ask <问题> [--chapter N] [--provider openai|mock]  仅基于结构化数据回答（--chapter 临时覆盖阅读进度）
+story ask <问题> [--chapter N] [--provider openai|mock]  仅基于结构化数据回答（含人物卡片，原 character 已并入；--chapter 临时覆盖阅读进度）
+story stats                                   数据/成本/构建性能 + 完整性校验（原 validate 已并入；严重错误 → exit 1）
+story audit [--chapter N]                     Reader 可见性审计
 story tui [--provider openai|mock]            交互式问答界面（/chapter N 切换进度，切换会重置 Agent 会话）
-story character <人物名>                      人物卡片（严格受 userChapter 约束）
-story stats                                   数据量与 LLM 成本统计（availableThrough / builtThrough）
-story audit [--chapter N]                     Reader 可见性审计（audit-spoilers 为别名）
 ```
 
 `--provider` 默认：检测到 `LLM_BASE_URL/LLM_API_KEY/LLM_MODEL` 用 `openai`，否则用 `mock`（离线模板回答器，仅用于验证管道）。
@@ -246,7 +245,8 @@ LLM 模式下，`story ask` 与 `story tui` 基于 [@earendil-works/pi-agent-cor
 
 - **工具集**（全部只读结构化数据，受 userChapter 过滤）：`search_entities`（模糊找人）、`get_entity`（完整档案）、`list_abilities`（能力）、`get_relations`（关系）、`list_events`（事件）、`get_entity_index`（全书实体索引）、`get_progress`（阅读进度 + availableThrough/builtThrough）、`list_chapters`（章节目录元信息）、`set_chapter_focus`（选定章节焦点，final cap = min(focus.to, userChapter)）。
 - **`story tui`**：基于 [@earendil-works/pi-tui](https://github.com/earendil-works/pi) 的交互式界面——底部输入框提问、上方 Markdown 渲染回答、实时显示工具调用过程、支持多轮连续追问。
-  - 斜杠命令：`/help`、`/context`、`/chapter <N>`、`/build`、`/import`、`/validate`、`/review`、`/audit`、`/stats`、`/progress`、`/clear`、`/exit`。
+  - 斜杠命令：`/help`、`/status`、`/config`、`/chapter <N>`、`/build`、`/import`、`/review`、`/audit`、`/clear`、`/exit`（`/status` 合并了原 `/context` `/stats` `/progress` `/validate`；`/config` 按组查看/修改配置：llm / build / reader）。
+  - **LLM 未配置时不会卡在 mock 死胡同**：TUI 会提示「LLM 未配置」，输入 `/config llm` 配置端点 / Key / 模型，保存后重启即可问答；`/status`、`/build` 等命令不受影响。
   - **切换章节会重置 Agent 会话**：`/chapter 800` 问过未来信息后再 `/chapter 405`，Agent conversation 被清空，防止未来数据通过上下文泄露。
 - 防剧透约束不变：所有工具只经 `StoryRepo` 读结构化表，`chapters` 原文在 Ask/Agent/TUI 代码路径上不存在（e2e 有静态检查）。
 
@@ -258,7 +258,7 @@ LLM 模式下，`story ask` 与 `story tui` 基于 [@earendil-works/pi-agent-cor
 
 - 完整导入 420 章 + 全量构建（无物理截断）；
 - **Fact A**：完整 DB 存在 406~420 章未来数据（未来实体/能力/身份/别名/锚点/事件）；
-- **Fact B**：userChapter=405 时，`findEntityByName / findByAlias / getEntity / search_entities / listEntities / listFacts / listAbilities / listEvents / listMemoryAnchors / character / ask` 全部看不到未来数据；
+- **Fact B**：userChapter=405 时，`findEntityByName / findByAlias / getEntity / search_entities / listEntities / listFacts / listAbilities / listEvents / listMemoryAnchors / ask` 全部看不到未来数据；
 - 多章节视角回归：可见数据随 userChapter 单调增长；降低 userChapter 后未来信息立即消失；
 - Extraction Batch Range Validation：批 100~110 输出 chapter=120 必须失败；
 - same-name-different-type → `possible_duplicates(type_conflict)`；

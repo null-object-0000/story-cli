@@ -36,6 +36,29 @@ export interface ExtractionBundle {
 
 export class ValidationError extends Error {}
 
+/**
+ * 校验失败反馈的"点名升级"：对 newEntities.type 非法这类错误，
+ * 直接从原始输出里找出所有非法实体条目并点名，让反馈比泛化提示更可执行
+ * （模型已多次无视泛化提示"请移出 newEntities"，点名具体条目更能打破死循环）。
+ * 若无法定位到具体条目，则退回原始错误信息。
+ */
+export function buildValidationFeedback(raw: unknown, error: string): string {
+  if (!error.includes("newEntities.type 非法")) return error;
+  const names: string[] = [];
+  if (typeof raw === "object" && raw !== null) {
+    const arr = (raw as Record<string, unknown>).newEntities;
+    if (Array.isArray(arr)) {
+      for (const e of arr) {
+        if (typeof e === "object" && e !== null && !ENTITY_TYPES.includes((e as { type?: unknown }).type as any)) {
+          names.push(String((e as { name?: unknown }).name ?? "?"));
+        }
+      }
+    }
+  }
+  if (names.length === 0) return error;
+  return `${error}。请从 newEntities 中【删除】以下条目（它们不是合法实体类型；若为能力，能力本体已在 abilities 数组记录，不得再作为实体）：${names.join("、")}`;
+}
+
 function num(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) return Number(v);

@@ -144,10 +144,11 @@ function main(): number {
     assert(r.stdout.includes("Review 完成"), `review 未完成: ${r.stdout.slice(0, 200)}`);
   });
 
-  // ---- 5. validate ----
-  test("validate", () => {
-    const r = exec(["validate"]);
-    assert(r.code === 0, `validate 失败（存在严重错误）: ${r.stdout.slice(0, 500)}`);
+  // ---- 5. stats（含完整性校验，原 validate 已并入 stats）----
+  test("stats 含完整性校验（无严重错误 → exit 0）", () => {
+    const r = exec(["stats"]);
+    assert(r.code === 0, `stats 报告严重错误: ${r.stdout.slice(0, 500)}`);
+    assert(r.stdout.includes("未发现严重错误"), `stats 应含完整性结论: ${r.stdout.slice(0, 300)}`);
   });
 
   // ---- 6. ask 用例（userChapter=405）----
@@ -220,25 +221,12 @@ function main(): number {
     assert(r.stdout.includes("未来人物"), `800 章应能看到未来人物：\n${r.stdout}`);
   });
 
-  // ---- 7. character（Reader 功能，受 userChapter 约束）----
-  test("character 闻人佑（不得出现未来别名/锚点）", () => {
-    const r = exec(["character", "闻人佑"]);
-    assert(r.code === 0, `character 失败: ${r.stderr}`);
-    const out = r.stdout;
-    assert(out.includes("闻人佑"), `应包含人物名：\n${out}`);
-    assert(out.includes("三师兄"), `应包含身份"三师兄"：\n${out}`);
-    assert(out.includes("第392章"), `应包含章节：\n${out}`);
-    assert(!out.includes("未来"), `character 不得出现未来内容：\n${out}`);
-  });
-
-  test("character 未来人物（userChapter=405 必须不可见）", () => {
-    const r = exec(["character", "未来人物"]);
-    assert(r.code !== 0, `未来人物在 405 章应查找失败（返回非零）：${r.stdout.slice(0, 300)}`);
-  });
-
-  test("character 不存在的人", () => {
-    const r = exec(["character", "张三"]);
-    assert(r.code !== 0, `应返回非零：${r.stdout.slice(0, 200)}`);
+  // ---- 7. 命令面精简验证（原 character 命令已并入 ask；validate 并入 stats；audit-spoilers 并入 audit）----
+  test("已移除命令：character / validate / audit-spoilers 返回未知命令", () => {
+    for (const args of [["character", "闻人佑"], ["validate"], ["audit-spoilers"]]) {
+      const r = exec(args);
+      assert(r.code !== 0, `${args.join(" ")} 应已移除（返回非零）：${r.stdout.slice(0, 200)}`);
+    }
   });
 
   // ---- 8. stats ----
@@ -256,12 +244,6 @@ function main(): number {
     assert(r.stdout.includes("Reader Visibility Audit"), `应为 Reader Visibility Audit：\n${r.stdout.slice(0, 200)}`);
     assert(r.stdout.includes("Reader visibility violations: 0"), `应报告 0 违规：\n${r.stdout.slice(0, 300)}`);
     assert(r.stdout.includes("Future data present in DB"), `应报告 Fact A 未来数据存在：\n${r.stdout.slice(0, 400)}`);
-  });
-
-  test("audit-spoilers 别名可用", () => {
-    const r = exec(["audit-spoilers", "--chapter", String(USER_CHAPTER)]);
-    assert(r.code === 0, `audit-spoilers 失败: ${r.stdout.slice(0, 400)}`);
-    assert(r.stdout.includes("Reader visibility violations: 0"), `应报告 0 违规：\n${r.stdout.slice(0, 300)}`);
   });
 
   // ---- 10. 断点续跑验证 ----

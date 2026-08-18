@@ -60,6 +60,13 @@ export interface ExtractionInput {
   knownEntities: KnownEntityDigest[];
   aliases: { alias: string; entityId: string; entityName: string }[];
   previousSummary: string | null;
+  /**
+   * 上一次输出的校验错误反馈（自动重试修复用）。
+   * pipeline 在 validateExtractionOutput 抛 ValidationError 后，把错误信息回填到这里，
+   * 让下一次尝试看到具体问题并针对性修复（而不是盲目重跑同一条 prompt）。
+   * 首次调用时为空字符串/undefined。
+   */
+  feedback?: string;
 }
 
 export interface LlmCapabilities {

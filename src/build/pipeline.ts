@@ -4,7 +4,7 @@
 
 import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ChapterSlice, ExtractionInput } from "../llm/types.js";
-import { validateExtractionOutput, ValidationError, ExtractionBundle } from "./validation.js";
+import { validateExtractionOutput, buildValidationFeedback, ValidationError, ExtractionBundle } from "./validation.js";
 import { aliasClashToDuplicate } from "./resolution.js";
 import { agentExtract, supportsAgentExtract } from "./agent-extractor.js";
 import { BuildSessionLogger } from "./session-log.js";
@@ -70,6 +70,8 @@ export interface BuildProgress {
 export interface BatchResult {
   range: string;
   status: "done" | "failed";
+  /** 失败原因（如校验错误、入库错误）；成功批次为空 */
+  error?: string;
   newEntities: number;
   entityUpdates: number;
   aliases: number;
@@ -248,7 +250,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     if (texts.length === 0) {
       warn(`[${key}] 无章节文本，跳过`);
       const zero = zeroCounts();
-      const br: BatchResult = { range: key, status: "failed", ...zero };
+      const br: BatchResult = { range: key, status: "failed", error: "无章节文本", ...zero };
       processed.push(br);
       running.splice(running.indexOf(key), 1);
       emitProgress(key, "failed", br);
@@ -286,26 +288,33 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     // 调用 + 校验 + 重试
     let bundle: ExtractionBundle | null = null;
     let lastError = "";
+    // 校验失败的反馈：回填给下一次尝试，让重试"会修"而不是盲目重跑同一 prompt
+    let feedback = "";
     let usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+    /** 本次尝试的原始输出（校验失败时用于点名定位非法条目，构建更有针对性的反馈） */
+    let rawOutput: unknown = null;
     const batchChars = texts.reduce((s, t) => s + t.text.length, 0);
     const t0 = Date.now();
     let attempt = 0;
     for (; attempt <= retries; attempt++) {
       if (attempt > 0) {
-        log(`  [${key}] 校验失败，第 ${attempt} 次重试...`);
+        log(`  [${key}] 校验失败：${feedback || lastError}（第 ${attempt} 次修复重试...）`);
         await sleep(500 * attempt);
       }
       try {
         const res = agentMode
-          ? await agentExtract(provider, repo, input, {
+          ? await agentExtract(provider, repo, { ...input, feedback }, {
               onActivity: (line) => {
                 statusLine = line;
                 emitProgress(key, "running", zeroResult(key, "done"), statusLine);
               },
               sessionLog: sessionLogForAgent,
             })
-          : (bump("等待 LLM 响应（流式生成中）..."), await provider.extract(input));
+          : (bump("等待 LLM 响应（流式生成中）..."), await provider.extract({ ...input, feedback }));
         usage = res.usage;
+        rawOutput = res.output;
+        // 设计原则：校验错误不在这里"悄悄修数据"，而是由反馈循环回传给 LLM，
+        // 让模型自己修正输出（见下方 catch 里的 feedback 回填 + prompts.buildFixInstruction）。
         bundle = validateExtractionOutput(res.output, r.start, r.end);
         // 校验通过：记录结构化产出统计（准确度分析用）
         batchSessionLog?.write({
@@ -326,6 +335,9 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         break;
       } catch (e) {
         lastError = e instanceof Error ? e.message : String(e);
+        // 仅校验错误携带"修复反馈"重试（网络/超时等重试不需要修复提示，也避免把非校验错误误当提示）。
+        // 反馈会点名具体非法条目（如"删除 newEntities 中的 杀戮舞曲"），比泛化提示更可执行。
+        feedback = e instanceof ValidationError ? buildValidationFeedback(rawOutput, lastError) : "";
         if (attempt >= retries) break;
       }
     }
@@ -336,7 +348,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       warn(`[${key}] 抽取失败（重试 ${retries} 次后放弃）：${lastError}`);
       repo.addLlmLog({ phase: "extract", model: provider.name, range: key, chars: batchChars, chapters: texts.length, inputTokens: usage.inputTokens, inputUncachedTokens: usage.inputTokens - usage.cachedTokens, outputTokens: usage.outputTokens, durationMs, success: false, retries: attempt, error: lastError });
       repo.markBatch(key, r.start, r.end, "failed", zeroCounts(), null);
-      const br: BatchResult = { range: key, status: "failed", ...zeroCounts() };
+      const br: BatchResult = { range: key, status: "failed", error: lastError, ...zeroCounts() };
       processed.push(br);
       running.splice(running.indexOf(key), 1);
       emitProgress(key, "failed", br);
@@ -420,7 +432,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       warn(`[${key}] 入库失败（事务回滚）：${msg}`);
       repo.addLlmLog({ phase: "extract", model: provider.name, range: key, chars: batchChars, chapters: texts.length, inputTokens: usage.inputTokens, inputUncachedTokens: usage.inputTokens - usage.cachedTokens, outputTokens: usage.outputTokens, durationMs, success: false, retries: attempt, error: msg });
       repo.markBatch(key, r.start, r.end, "failed", zeroCounts(), null);
-      const br: BatchResult = { range: key, status: "failed", ...zeroCounts() };
+      const br: BatchResult = { range: key, status: "failed", error: msg, ...zeroCounts() };
       processed.push(br);
       running.splice(running.indexOf(key), 1);
       emitProgress(key, "failed", br);

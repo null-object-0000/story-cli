@@ -34,8 +34,8 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
     const { provider, mode } = createProvider(cfg, providerFlag as any | undefined);
     const offline = mode === "mock";
     if (offline) {
-      warn("未检测到真实 LLM（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL），以离线模式启动 TUI：");
-      warn("  Agent 问答不可用；/stats、/context、/chapter 等命令照常可用，配置 LLM 后重启获得完整问答。");
+      warn("LLM 未配置（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL）：Agent 问答暂不可用，进入「未配置」状态");
+      warn("  在 TUI 内输入 /config llm 配置端点 / Key / 模型，保存后重启 story tui 即可问答；/build /status 等命令照常可用。");
     }
 
     const toolCtx: NovelToolContext = {
@@ -51,11 +51,14 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
     const agent = kit ? createStoryAgent(kit.model, kit.streamFn, repo, cfg, toolCtx) : createOfflineAgent(repo, cfg, toolCtx);
 
     const offlineWelcome = [
-      "当前为离线（mock）模式，未配置真实 LLM。",
+      "**LLM 未配置**：Agent 问答暂不可用，但这不阻碍你使用其它功能。",
       "",
-      "可先用不依赖 LLM 的命令浏览数据：`/stats`、`/context`、`/chapter <N>`、`/progress`、`/validate`、`/review`、`/audit`、`/help`。",
+      "直接在此输入 `/config llm` 查看 LLM 配置组，或用：",
+      "- `/config llm.baseUrl=http://127.0.0.1:18640/v1`",
+      "- `/config llm.apiKey=sk-xxx`",
+      "- `/config llm.model=deepseek-chat`",
       "",
-      "启用 Agent 问答：在项目根目录配置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL（可写 .env），然后重启 story tui。",
+      "保存后**重启 story tui** 即可问答。其它命令照常可用：`/status`、`/chapter <N>`、`/review`、`/audit`、`/help`。",
     ].join("\n");
 
     await runTuiApp({

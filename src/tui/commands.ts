@@ -1,9 +1,9 @@
-// TUI 斜杠命令处理器：/build, /import, /validate, /review, /audit, /stats, /context, /help
+// TUI 斜杠命令处理器：/build, /import, /status, /review, /audit, /help
 // 像 Claude Code 一样，在输入框输入 /xxx 执行运维操作，结果渲染到聊天区
 // 命令注册表 SLASH_COMMANDS 同时驱动 pi-tui Editor 的斜杠命令自动补全
 
 import { StoryRepo } from "../db/repo.js";
-import { StoryConfig, resolveLlmPrices, costEstimate } from "../config.js";
+import { StoryConfig, saveConfig } from "../config.js";
 import { LlmProvider } from "../llm/types.js";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { SlashCommand } from "@earendil-works/pi-tui";
@@ -32,15 +32,13 @@ export interface CommandResult {
 /** 命令注册表：name/description 用于 pi-tui 输入 `/` 时的补全菜单 */
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "help", description: "显示所有可用命令" },
-  { name: "context", description: "查看工作区与会话上下文" },
+  { name: "status", description: "工作区状态：数据量/成本/构建性能/进度/完整性校验" },
+  { name: "config", description: "查看/修改配置（分组：llm / build / reader）", argumentHint: "[组] 或 [key=value]" },
   { name: "chapter", description: "查看/切换当前阅读进度（Ask 防剧透边界）", argumentHint: "<章节号>" },
   { name: "build", description: "构建知识库（Agent 化抽取，失败即停）", argumentHint: "[--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]" },
   { name: "import", description: "导入小说文件（会清空现有数据）", argumentHint: "<文件路径>" },
-  { name: "validate", description: "完整性校验" },
   { name: "review", description: "审核疑似重复/低置信度数据", argumentHint: "[--auto]" },
   { name: "audit", description: "防剧透审计" },
-  { name: "stats", description: "数据统计" },
-  { name: "progress", description: "查看结构化处理进度（已处理/未处理章节）" },
   { name: "clear", description: "清空聊天历史" },
   { name: "exit", description: "退出" },
 ];
@@ -110,15 +108,13 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           "| 命令 | 说明 |",
           "|------|------|",
           "| `/help` | 显示此帮助 |",
-          "| `/context` | 查看工作区与会话上下文 |",
+          "| `/status` | 工作区状态：数据量 / LLM 成本 / 构建性能 / 处理进度 / 完整性校验（合并了原 /context /stats /progress /validate） |",
+          "| `/config` | 查看/修改配置（分组：`/config llm`、`/config build`、`/config reader`；设置如 `/config llm.model=deepseek-v4-flash`） |",
           "| `/chapter <N>` | 切换当前阅读进度（Ask 防剧透边界，默认第 1 章） |",
           "| `/build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]` | 构建知识库（Agent 化抽取：模型自己检索已有实体；--no-agent 回退注入式，--keep-going 失败后继续） |",
           "| `/import <path>` | 导入小说文件（注意：会清空现有数据） |",
-          "| `/validate` | 完整性校验 |",
           "| `/review [--auto]` | 审核疑似重复/低置信度数据 |",
           "| `/audit` | 防剧透审计 |",
-          "| `/stats` | 数据统计 |",
-          "| `/progress` | 查看结构化处理进度（已处理/未处理章节） |",
           "| `/clear` | 清空聊天历史 |",
           "| `/exit` | 退出 |",
           "",
@@ -126,9 +122,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
         ].join("\n"),
       };
 
-    // ── 工作区上下文 ──
-    case "context": {
-      const c = repo.counts();
+    // ── 工作区状态（合并原 /context /stats /progress /validate） ──
+    case "status": {
       const chapters = repo.countChapters();
       const availableThrough = repo.availableThrough() ?? 0;
       const builtThrough = repo.builtThrough();
@@ -142,30 +137,72 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
         ? `最近 5 章：${recentChapters.map((m) => `第 ${m.chapter} 章 ${m.title}`).join("、")}`
         : "最近 5 章：无";
 
-      return {
-        text: [
-          `## 工作区：${cfg.book}`,
-          "",
-          "| 项目 | 数值 |",
-          "|------|------|",
-          `| 已导入章节 | ${chapters}（availableThrough = ${availableThrough}） |`,
-          `| 已构建章节 | ${builtThrough ?? 0}（builtThrough） |`,
-          `| 当前阅读进度 | **第 ${cfg.userChapter} 章**（/chapter 切换） |`,
-          `| 实体 | ${c.entities} |`,
-          `| 事实 | ${c.facts} |`,
-          `| 关系 | ${c.relations} |`,
-          `| 能力 | ${c.abilities} |`,
-          `| 事件 | ${c.events} |`,
-          `| 记忆锚点 | ${c.memoryAnchors} |`,
-          `| 疑似重复 | ${c.pendingDuplicates} |`,
-          `| 低置信度事实 | ${c.lowConfidenceFacts} |`,
-          `| 开放冲突 | ${c.openConflicts} |`,
-          "",
-          focusLine,
-          recentLine,
-          provider ? "**LLM 已配置**" : "**LLM 未配置**（mock 模式）",
-        ].join("\n"),
-      };
+      const lines = [`## 工作区状态：${cfg.book}`, ""];
+
+      // ── 上下文 ──
+      lines.push("### 上下文");
+      lines.push(`- 已导入章节：${chapters}（availableThrough = ${availableThrough}）`);
+      lines.push(`- 已构建章节：${builtThrough ?? 0}（builtThrough）`);
+      lines.push(`- 当前阅读进度：**第 ${cfg.userChapter} 章**（/chapter 切换）`);
+      lines.push(`- ${focusLine}`);
+      lines.push(`- ${recentLine}`);
+      lines.push(`- **LLM ${provider ? "已配置" : "未配置"}**${provider ? "" : "（可用 `/config llm` 配置，保存后重启 TUI 生效）"}`);
+
+      // ── 处理进度 ──
+      lines.push("");
+      lines.push("### 处理进度");
+      const batches = repo.listBatches(); // [{range: "1-5", status: "done"|"failed"}]
+      const doneChapters = new Set<number>();
+      const failedChapters = new Set<number>();
+      for (const b of batches) {
+        const [s, e] = b.range.split("-").map(Number);
+        if (isNaN(s) || isNaN(e)) continue;
+        for (let ch = s; ch <= e; ch++) {
+          if (b.status === "done") doneChapters.add(ch);
+          else failedChapters.add(ch);
+        }
+      }
+      // 失败统计不包含已被 done 批次覆盖的章节（如旧失败批与后来逐章成功批重叠）
+      for (const ch of [...failedChapters]) if (doneChapters.has(ch)) failedChapters.delete(ch);
+      const done = doneChapters.size;
+      const failed = failedChapters.size;
+      const pct = availableThrough > 0 ? Math.round((done / availableThrough) * 100) : 0;
+      const barWidth = 30;
+      const filled = Math.round((pct / 100) * barWidth);
+      const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+      lines.push(`\`${bar}\` **${pct}%**（${done}/${availableThrough} 章）`);
+      if (failed > 0) lines.push(`> ⚠️ ${failed} 章失败（可用 \`/build\` 自动重试）`);
+      // 未处理区间（连续未 done 的章节）
+      const unprocessedRanges: string[] = [];
+      let rangeStart: number | null = null;
+      for (let ch = 1; ch <= availableThrough; ch++) {
+        if (!doneChapters.has(ch)) {
+          if (rangeStart === null) rangeStart = ch;
+        } else {
+          if (rangeStart !== null) {
+            unprocessedRanges.push(rangeStart === ch - 1 ? `第 ${rangeStart} 章` : `第 ${rangeStart}～${ch - 1} 章`);
+            rangeStart = null;
+          }
+        }
+      }
+      if (rangeStart !== null) unprocessedRanges.push(rangeStart === availableThrough ? `第 ${availableThrough} 章` : `第 ${rangeStart}～${availableThrough} 章`);
+      if (unprocessedRanges.length === 0) {
+        lines.push("✅ **全部章节已处理完成！**");
+      } else {
+        lines.push("**未处理/待重跑：**");
+        for (const r of unprocessedRanges) lines.push(`- ${r}`);
+      }
+
+      // ── 数据 & 成本 & 性能 & 完整性（复用 cmdStats，含退出码） ──
+      lines.push("");
+      lines.push("### 数据 & 成本 & 性能 & 完整性");
+      const { cmdStats } = await import("../cmd/stats.js");
+      const { result, output } = await captureConsole(() => cmdStats());
+      lines.push("```");
+      lines.push(output.trim());
+      lines.push("```");
+      lines.push(result === 0 ? "✅ 完整性通过（无严重错误）" : "❌ 完整性存在严重错误");
+      return { text: lines.join("\n") };
     }
 
     // ── 切换阅读进度 ──
@@ -311,7 +348,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       if (failed.length > 0) {
         summary.push("");
         summary.push("### 失败批次");
-        for (const b of failed) summary.push(`- ${b.range} ❌`);
+        for (const b of failed) summary.push(`- ${b.range} ❌${b.error ? `（${b.error}）` : ""}`);
         summary.push("\n可用 `/build --force` 重跑失败区间。");
       }
       if (result.skipped > 0) {
@@ -354,22 +391,6 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       };
     }
 
-    // ── 完整性校验 ──
-    case "validate": {
-      const { cmdValidate } = await import("../cmd/validate.js");
-      const { result, output } = await captureConsole(() => cmdValidate());
-      const status = result === 0 ? "✅ 通过（无严重错误）" : "❌ 存在错误";
-      const lines = [
-        "## 完整性校验",
-        `**结果：** ${status}`,
-        "",
-        "```",
-        output.trim(),
-        "```",
-      ];
-      return { text: lines.join("\n") };
-    }
-
     // ── 审核 ──
     case "review": {
       const { cmdReview } = await import("../cmd/review.js");
@@ -389,8 +410,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
     }
 
     // ── 防剧透审计 ──
-    case "audit":
-    case "audit-spoilers": {
+    case "audit": {
       const { cmdAuditSpoilers } = await import("../cmd/spoilers.js");
       const { result, output } = await captureConsole(() => cmdAuditSpoilers());
       const status = result === 0 ? "✅ 无越界" : "❌ 发现越界章节";
@@ -405,171 +425,54 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       return { text: lines.join("\n") };
     }
 
-    // ── 数据统计 ──
-    case "stats": {
-      const c = repo.counts();
-      const chapters = repo.countChapters();
-      const dbMax = repo.availableThrough() ?? 0;
-      const builtThrough = repo.builtThrough();
-      const llm = repo.llmLogSummary();
-      const byPhase = repo.db
-        .prepare("SELECT phase, COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output, SUM(retries) AS retries, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures FROM llm_logs GROUP BY phase")
-        .all() as { phase: string; calls: number; input: number; output: number; retries: number; failures: number }[];
+    // ── 配置（分组查看 + 修改，类似 code agent 的 /config） ──
+    case "config": {
+      const arg = positional[0] ?? "";
+      const usage = "用法：`/config`（全部）/ `/config <组>`（llm|build|reader）/ `/config <key>=<value>`（设置，如 `/config llm.model=deepseek-v4-flash`）";
 
-      const lines: string[] = [`## 数据统计：${cfg.book}`];
+      // 1) 查看某组
+      if (arg) {
+        const grp = CONFIG_GROUPS.find((g) => g.group === arg);
+        if (grp) {
+          return { text: ["## 配置：", ...renderConfigGroup(cfg, grp)].join("\n") };
+        }
+      }
 
-      // 结构化数据
-      const structRows = [
-        ["已导入章节", `${chapters}（availableThrough = ${dbMax}）`],
-        ["已构建章节", `${builtThrough ?? 0}`],
-        ["实体", `${c.entities}`],
-        ["别名", `${c.aliases}`],
-        ["事实", `${c.facts}`],
-        ["关系", `${c.relations}`],
-        ["能力", `${c.abilities}`],
-        ["事件", `${c.events}`],
-        ["记忆锚点", `${c.memoryAnchors}`],
-        ["出场记录", `${c.appearances}`],
-      ];
-      // 如果有待处理项，附加
-      if (c.pendingDuplicates) structRows.push(["待审核重复", `${c.pendingDuplicates} ⚠️`]);
-      if (c.lowConfidenceFacts) structRows.push(["低置信度事实", `${c.lowConfidenceFacts} ⚠️`]);
-      if (c.openConflicts) structRows.push(["开放冲突", `${c.openConflicts} ⚠️`]);
-
-      lines.push("");
-      lines.push("### 结构化数据");
-      lines.push("| 项目 | 数量 |");
-      lines.push("|------|------|");
-      for (const [k, v] of structRows) lines.push(`| ${k} | ${v} |`);
-
-      // LLM 调用
-      if (llm.calls > 0) {
-        lines.push("");
-        lines.push("### LLM 调用");
-        lines.push("| 指标 | 数值 |");
-        lines.push("|------|------|");
-        lines.push(`| 调用次数 | ${llm.calls} |`);
-        lines.push(`| 输入 tokens | ${llm.input.toLocaleString()} |`);
-        lines.push(`| 输出 tokens | ${llm.output.toLocaleString()} |`);
-        lines.push(`| 重试次数 | ${llm.retries} |`);
-        lines.push(`| 失败次数 | ${llm.failures} |`);
-        lines.push(`| 总耗时 | ${(llm.duration / 1000).toFixed(1)}s |`);
-
-        if (byPhase.length) {
-          lines.push("");
-          lines.push("#### 按阶段");
-          lines.push("| 阶段 | 调用 | 输入 tokens | 输出 tokens | 重试 | 失败 |");
-          lines.push("|------|------|-------------|--------------|------|------|");
-          for (const p of byPhase) {
-            lines.push(`| ${p.phase} | ${p.calls} | ${p.input.toLocaleString()} | ${p.output.toLocaleString()} | ${p.retries} | ${p.failures} |`);
+      // 2) 设置 key=value
+      const eq = arg.indexOf("=");
+      if (eq > 0) {
+        const key = arg.slice(0, eq).trim();
+        const raw = arg.slice(eq + 1);
+        const entry = findConfigKey(key);
+        if (!entry) {
+          return { text: `❌ 未知配置项：\`${key}\`。可用项：\n\n${renderConfigKeys(cfg)}` };
+        }
+        try {
+          const val = coerceConfigValue(key, entry.type, raw);
+          setConfigValue(cfg, key, val);
+          saveConfig(cfg);
+          // 阅读进度改动即时同步（repo 边界 + 工具上下文 + 清 Agent 历史防泄露）
+          if (key === "userChapter") {
+            repo.setUserChapter(val as number);
+            if (ctx.toolCtx) ctx.toolCtx.userChapter = val as number;
+            if (ctx.focus && ctx.focus.to !== null && ctx.focus.to > (val as number)) {
+              ctx.focus.from = null;
+              ctx.focus.to = null;
+            }
+            if (ctx.agent) ctx.agent.reset();
           }
-        }
-
-        const avgIn = Math.round(llm.input / llm.calls);
-        const avgOut = Math.round(llm.output / llm.calls);
-        lines.push(`\n平均每次调用：**${avgIn}** in / **${avgOut}** out`);
-        if (dbMax > 0) {
-          const ratio = 1900 / dbMax;
-          lines.push(`> 估算 1900 章全本：**${Math.round(llm.input * ratio).toLocaleString()}** in / **${Math.round(llm.output * ratio).toLocaleString()}** out`);
-        }
-      } else {
-        lines.push("\n> 暂无 LLM 调用记录（尚未执行 build 或 ask）");
-      }
-
-      // ── 构建性能（千字速度 / 千字 token / 缓存命中率 / 费用预估）──
-      const bm = repo.buildMetrics("extract");
-      if (bm.calls > 0 && bm.chars > 0) {
-        const charsPerSec = bm.durationMs > 0 ? (bm.chars / bm.durationMs) * 1000 : 0;
-        const cacheHit = bm.inputTokens > 0 ? (bm.inputTokens - bm.inputUncachedTokens) / bm.inputTokens : 0;
-        const cachedTokens = bm.inputTokens - bm.inputUncachedTokens;
-        const price = resolveLlmPrices(cfg);
-        const cost = costEstimate(bm.inputTokens, bm.inputUncachedTokens, bm.outputTokens, price);
-        const kChars = bm.chars / 1000;
-        lines.push("");
-        lines.push("### 抽取性能（逐章/批量）");
-        lines.push("| 指标 | 数值 |");
-        lines.push("|------|------|");
-        lines.push(`| 处理字符 | ${bm.chars.toLocaleString()}（${bm.chapters} 章） |`);
-        lines.push(`| 处理速度 | ${formatSpeed(charsPerSec)} |`);
-        lines.push(`| 输入 token/千字 | ${kChars > 0 ? Math.round(bm.inputTokens / kChars).toLocaleString() : 0}（含缓存） |`);
-        lines.push(`| 纯新增 token/千字 | ${kChars > 0 ? Math.round(bm.inputUncachedTokens / kChars).toLocaleString() : 0}（不含缓存） |`);
-        lines.push(`| 输出 token/千字 | ${kChars > 0 ? Math.round(bm.outputTokens / kChars).toLocaleString() : 0} |`);
-        lines.push(`| 缓存命中率 | ${(cacheHit * 100).toFixed(1)}%（${cachedTokens.toLocaleString()} / ${bm.inputTokens.toLocaleString()}） |`);
-        lines.push(`| 预估费用 | ¥${cost.toFixed(2)} |`);
-        // 整本预计（按当前速率推算剩余章节）
-        if (dbMax > bm.chapters && charsPerSec > 0) {
-          const avgCharsPerChapter = bm.chars / bm.chapters;
-          const remaining = dbMax - bm.chapters;
-          const etaSeconds = (remaining * avgCharsPerChapter) / charsPerSec;
-          lines.push(`> 剩余 ${remaining} 章，按当前速度预计还需 **${formatDuration(etaSeconds)}**`);
+          const needRestart = key.startsWith("llm.") || key.startsWith("build.");
+          const masked = key === "llm.apiKey" ? "••••••（已保存）" : String(val);
+          return {
+            text: `✅ 已保存 \`${key}\` = \`${masked}\`\n${needRestart ? "> ⚠️ LLM / 构建配置需重启 TUI 生效（退出后重新 `npm run dev`）。" : ""}`,
+          };
+        } catch (e) {
+          return { text: `❌ ${e instanceof Error ? e.message : String(e)}\n\n${usage}` };
         }
       }
 
-      return { text: lines.join("\n") };
-    }
-
-    // ── 处理进度 ──
-    case "progress": {
-      const dbMax = repo.availableThrough() ?? 0;
-      if (dbMax === 0) return { text: "chapters 表为空，请先执行 `/import` 导入小说。" };
-      const batches = repo.listBatches(); // [{range: "1-5", status: "done"|"failed"}]
-      const doneChapters = new Set<number>();
-      const failedChapters = new Set<number>();
-      for (const b of batches) {
-        const [s, e] = b.range.split("-").map(Number);
-        if (isNaN(s) || isNaN(e)) continue;
-        for (let c = s; c <= e; c++) {
-          if (b.status === "done") doneChapters.add(c);
-          else failedChapters.add(c);
-        }
-      }
-      // 修正：失败统计不能包含"已被 done 批次覆盖"的章节（如旧 26 章失败批与后来逐章成功批重叠）
-      for (const c of [...failedChapters]) {
-        if (doneChapters.has(c)) failedChapters.delete(c);
-      }
-      const total = dbMax;
-      const done = doneChapters.size;
-      const failed = failedChapters.size;
-      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-      const barWidth = 30;
-      const filled = Math.round((pct / 100) * barWidth);
-      const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
-
-      // 未处理区间（连续未 done 的章节）
-      const unprocessedRanges: string[] = [];
-      let rangeStart: number | null = null;
-      for (let c = 1; c <= total; c++) {
-        if (!doneChapters.has(c)) {
-          if (rangeStart === null) rangeStart = c;
-        } else {
-          if (rangeStart !== null) {
-            const end = c - 1;
-            unprocessedRanges.push(rangeStart === end ? `第 ${rangeStart} 章` : `第 ${rangeStart}～${end} 章`);
-            rangeStart = null;
-          }
-        }
-      }
-      if (rangeStart !== null) unprocessedRanges.push(rangeStart === total ? `第 ${total} 章` : `第 ${rangeStart}～${total} 章`);
-
-      const lines = [
-        `## 处理进度`,
-        "",
-        `\`${bar}\` **${pct}%**（${done}/${total} 章）`,
-        "",
-      ];
-      if (failed > 0) lines.push(`> ⚠️ ${failed} 章失败（可用 \`/build --force\` 重跑）`);
-      if (unprocessedRanges.length === 0) {
-        lines.push("✅ **全部章节已处理完成！**");
-      } else {
-        lines.push("**未处理/待重跑：**");
-        for (const r of unprocessedRanges) lines.push(`- ${r}`);
-        if (unprocessedRanges.length <= 3) {
-          const firstChapter = unprocessedRanges[0].replace(/[^\d～]/g, "");
-          const startChapter = firstChapter.split("～")[0] || "1";
-          lines.push(`\n提示：用 \`/build --from ${startChapter}\` 开始处理。`);
-        }
-      }
-      return { text: lines.join("\n") };
+      // 3) 无参数 → 全部
+      return { text: ["## 当前配置", "", ...CONFIG_GROUPS.flatMap((g) => renderConfigGroup(cfg, g)), "", usage].join("\n") };
     }
 
     // ── 未知命令 ──
@@ -580,7 +483,115 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
 
 /** 命令列表提示（用于未知命令） */
 export function commandHint(): string {
-  return "可用命令：`/help`、`/context`、`/chapter`、`/build`、`/import`、`/validate`、`/review`、`/audit`、`/stats`、`/progress`";
+  return "可用命令：`/help`、`/status`、`/config`、`/chapter`、`/build`、`/import`、`/review`、`/audit`、`/clear`、`/exit`";
+}
+
+// ── 配置分组（/config） ──────────────────────────────
+
+interface ConfigKey {
+  key: string;
+  type: "string" | "number" | "boolean";
+  label: string;
+  hint?: string;
+}
+
+interface ConfigGroup {
+  group: string;
+  title: string;
+  keys: ConfigKey[];
+}
+
+const CONFIG_GROUPS: ConfigGroup[] = [
+  {
+    group: "llm",
+    title: "LLM（Agent 问答 / 构建）",
+    keys: [
+      { key: "llm.baseUrl", type: "string", label: "OpenAI-compatible 端点", hint: "如 http://127.0.0.1:18640/v1 或 https://api.deepseek.com/v1" },
+      { key: "llm.apiKey", type: "string", label: "API Key" },
+      { key: "llm.model", type: "string", label: "模型名", hint: "如 deepseek-chat / flowlet-pro / glm-4.5-air" },
+      { key: "llm.thinkingFormat", type: "string", label: "推理协议", hint: "auto|deepseek|zai|qwen|openrouter|openai" },
+      { key: "llm.extractReasoning", type: "string", label: "抽取思考强度", hint: "off|low|medium|high" },
+      { key: "llm.priceInputPerM", type: "number", label: "输入单价（元/百万 token）" },
+      { key: "llm.priceOutputPerM", type: "number", label: "输出单价（元/百万 token）" },
+      { key: "llm.priceCachedPerM", type: "number", label: "缓存单价（元/百万 token）" },
+    ],
+  },
+  {
+    group: "build",
+    title: "构建（story build）",
+    keys: [
+      { key: "build.batchSize", type: "number", label: "每批章节数（固定模式）" },
+      { key: "build.retries", type: "number", label: "批内重试次数" },
+      { key: "build.autoBatch", type: "boolean", label: "自适应分批（按上下文合并）" },
+      { key: "build.perChapterOutputTokens", type: "number", label: "每章输出 token 估算" },
+      { key: "build.maxBatchChapters", type: "number", label: "单批章节数上限" },
+      { key: "build.agentExtract", type: "boolean", label: "Agent 化抽取" },
+      { key: "build.sessionLog", type: "boolean", label: "会话日志" },
+    ],
+  },
+  {
+    group: "reader",
+    title: "阅读 / 读者",
+    keys: [
+      { key: "userChapter", type: "number", label: "阅读进度（防剧透边界）", hint: "也可用 /chapter N 即时切换" },
+      { key: "book", type: "string", label: "书名" },
+    ],
+  },
+];
+
+const ALL_CONFIG_KEYS: (ConfigKey & { group: string })[] = CONFIG_GROUPS.flatMap((g) => g.keys.map((k) => ({ ...k, group: g.group })));
+
+function findConfigKey(key: string): (ConfigKey & { group: string }) | undefined {
+  return ALL_CONFIG_KEYS.find((k) => k.key === key);
+}
+
+/** 按点路径读取配置值（如 cfg.llm.model） */
+function getConfigValue(cfg: StoryConfig, key: string): unknown {
+  return key.split(".").reduce((o: unknown, k) => (o == null ? undefined : (o as Record<string, unknown>)[k]), cfg as unknown);
+}
+
+/** 按点路径写入配置值（自动创建中间对象） */
+function setConfigValue(cfg: StoryConfig, key: string, value: unknown): void {
+  const parts = key.split(".");
+  const last = parts.pop()!;
+  let o = cfg as unknown as Record<string, unknown>;
+  for (const p of parts) {
+    if (o[p] == null || typeof o[p] !== "object") o[p] = {};
+    o = o[p] as Record<string, unknown>;
+  }
+  o[last] = value;
+}
+
+function coerceConfigValue(key: string, type: ConfigKey["type"], raw: string): string | number | boolean {
+  const v = raw.trim();
+  if (type === "number") {
+    const n = Number(v);
+    if (!Number.isFinite(n)) throw new Error(`「${key}」需要数值，收到：${raw}`);
+    return n;
+  }
+  if (type === "boolean") {
+    if (v === "true") return true;
+    if (v === "false") return false;
+    throw new Error(`「${key}」需要 true|false，收到：${raw}`);
+  }
+  return v;
+}
+
+function renderConfigGroup(cfg: StoryConfig, g: ConfigGroup): string[] {
+  const lines = [`### ${g.group} — ${g.title}`, ""];
+  for (const k of g.keys) {
+    const v = getConfigValue(cfg, k.key);
+    const shown = k.key === "llm.apiKey"
+      ? (v ? `••••••${String(v).slice(-4)}` : "（未设置）")
+      : (v === undefined || v === null ? "（未设置）" : String(v));
+    lines.push(`- \`${k.key}\` = \`${shown}\` — ${k.label}${k.hint ? `（${k.hint}）` : ""}`);
+  }
+  lines.push("", `设置示例：\`/config ${g.keys[0].key}=...\``);
+  return lines;
+}
+
+function renderConfigKeys(cfg: StoryConfig): string {
+  return CONFIG_GROUPS.map((g) => `**${g.group}（${g.title}）**\n` + g.keys.map((k) => `- \`${k.key}\``).join("\n")).join("\n\n");
 }
 
 /** 批次区间格式化："38-38" → "第 38 章"；"1-26" → "第 1~26 章" */
@@ -590,13 +601,6 @@ function fmtRange(range: string): string {
     return a === b ? `第 ${a} 章` : `第 ${a}~${b} 章`;
   }
   return range;
-}
-
-/** 处理速度格式化：字符/秒 → "5.2 千字/分钟" 或 "1.3 万字/分钟" */
-function formatSpeed(charsPerSec: number): string {
-  if (!charsPerSec || charsPerSec <= 0) return "—";
-  const perMin = charsPerSec * 60;
-  return perMin >= 10000 ? `${(perMin / 10000).toFixed(1)} 万字/分钟` : `${(perMin / 1000).toFixed(1)} 千字/分钟`;
 }
 
 /** 时长格式化：秒 → "2.3 小时" / "45 分钟" / "30 秒" */

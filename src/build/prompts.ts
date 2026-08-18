@@ -35,6 +35,11 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
    - 不要使用当前文本中出现的别名再次创建实体（工具已通过别名定位到该实体）；
    - 只有当某个名字检索后【未命中任何已有实体】时，才把它当作新实体（newEntities）。
 7. 能力的归属：明确命名的能力优先放入 abilities；不要在 facts 中重复写同一条能力（避免同一信息两处记录）。
+8. 【实体类型限制·硬性】newEntities 的 type 只允许：character|organization|location|item|concept。
+   - 能力/技能/招式/功法【永远不要】出现在 newEntities——不存在 "ability" 这个实体类型，
+     校验器会直接拒绝整批输出。
+   - 所有能力一律放入 abilities 数组（系统已有独立的 abilities 结构，见输出格式）；
+     若某个能力名确实需要被其他实体引用，最多以 type="concept" 建实体，优先不建。
 
 ## 输出格式
 只输出一个 JSON 对象，不要输出任何其他文字。格式：
@@ -64,6 +69,9 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
 export function buildExtractionPrompt(input: ExtractionInput): { system: string; user: string } {
   const system = EXTRACTION_SYSTEM_PROMPT.replaceAll(START_TOKEN, String(input.startChapter)).replaceAll(END_TOKEN, String(input.endChapter));
 
+  // 校验失败重试：把具体错误 + 定向提示注入本次输出（让重试真正"会修"，而不是盲重跑）
+  const fixBlock = input.feedback ? `${buildFixInstruction(input.feedback)}\n\n` : "";
+
   const knownEntities = input.knownEntities
     .slice(0, 800)
     .map((e) => `${e.name}（id=${e.id}，type=${e.type}）`)
@@ -78,7 +86,7 @@ export function buildExtractionPrompt(input: ExtractionInput): { system: string;
     .map((t) => `【第${t.chapter}章 ${t.title}】\n${t.text.slice(0, 8000)}`)
     .join("\n\n");
 
-  const user = `## 已存在的实体（canonical name 用 name 字段；最终 JSON 引用时请用 canonical name，不要用别名再建实体）
+  const user = `${fixBlock}## 已存在的实体（canonical name 用 name 字段；最终 JSON 引用时请用 canonical name，不要用别名再建实体）
 ${knownEntities || "（暂无）"}
 
 ## 已存在的别名映射
@@ -93,4 +101,19 @@ ${chapters}
 请严格按系统要求输出 JSON。`;
 
   return { system, user };
+}
+
+/**
+ * 校验失败后的修复指令：把校验器报出的具体错误反馈给模型，并附定向提示。
+ * 供 Agent 化抽取（agent-extractor.ts）与注入式抽取（buildExtractionPrompt）共用。
+ */
+export function buildFixInstruction(feedback: string): string {
+  const hint = feedback.includes("newEntities.type 非法")
+    ? "\n- 能力/技能/招式/功法【永远】不允许出现在 newEntities 里（不存在 \"ability\" 这个实体类型）。请【删除】这些条目，不要保留、不要改写类型；能力只属于 abilities 数组（已在里面就保持原样，不要再建实体）。newEntities.type 只允许 character|organization|location|item|concept。"
+    : "";
+  return `## 上一次输出未通过校验（请修复后重新输出）
+校验器报告：
+> ${feedback}
+${hint}
+请修正问题后，重新输出【完整】的结构化 JSON（不要只输出修正片段，不要输出任何解释文字）。`;
 }

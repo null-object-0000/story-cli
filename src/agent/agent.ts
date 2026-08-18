@@ -199,16 +199,16 @@ export function createOfflineAgent(repo: StoryRepo, cfg: StoryConfig, toolCtx: N
 
 /** 离线模式下问答返回的提示文本 */
 export const OFFLINE_ANSWER = [
-  "当前为离线（mock）模式，未配置真实 LLM，无法进行 Agent 问答。",
+  "当前未配置真实 LLM，无法进行 Agent 问答。",
   "",
-  "启用完整问答：",
-  "  1. 在项目根目录创建 .env 文件，写入：",
-  "       LLM_BASE_URL=https://api.deepseek.com",
-  "       LLM_API_KEY=<你的 Key>",
-  "       LLM_MODEL=deepseek-chat",
-  "  2. 重新运行 story tui",
+  "在 TUI 内直接配置（无需手动改文件）：",
+  "  /config llm.baseUrl=https://api.deepseek.com/v1",
+  "  /config llm.apiKey=<你的 Key>",
+  "  /config llm.model=deepseek-chat",
   "",
-  "不依赖 LLM 的命令仍可用：/stats、/context、/chapter、/progress、/validate、/review、/audit、/help。",
+  "保存后重新运行 story tui（或 npm run dev）即可启用完整问答。",
+  "",
+  "不依赖 LLM 的命令仍可用：/status、/chapter、/review、/audit、/help。",
 ].join("\n");
 
 function offlineModel(): unknown {

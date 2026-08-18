@@ -12,7 +12,7 @@ import { Type } from "typebox";
 import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ExtractionInput, ExtractionResult } from "../llm/types.js";
 import { extractJson } from "../llm/openai.js";
-import { EXTRACTION_SYSTEM_PROMPT } from "./prompts.js";
+import { EXTRACTION_SYSTEM_PROMPT, buildFixInstruction } from "./prompts.js";
 import type { BuildSessionLogger } from "./session-log.js";
 import type { NovelTool } from "../agent/tools.js";
 import { log, warn } from "../logger.js";
@@ -65,7 +65,10 @@ export async function agentExtract(
     .map((t) => `【第${t.chapter}章 ${t.title}】\n${t.text}`)
     .join("\n\n");
 
-  const userMessage = `## 此前剧情摘要（供上下文理解，来自上一批抽取）
+  // 校验失败重试：把具体错误 + 定向提示注入本次输出（agent 与注入式共用同一套修复指令）
+  const fixBlock = input.feedback ? buildFixInstruction(input.feedback) + "\n\n" : "";
+
+  const userMessage = `${fixBlock}## 此前剧情摘要（供上下文理解，来自上一批抽取）
 ${input.previousSummary || "（无）"}
 
 ## 待抽取章节（第 ${input.startChapter}~${input.endChapter} 章）

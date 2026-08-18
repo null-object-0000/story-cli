@@ -72,57 +72,34 @@ const commands: Record<string, CommandEntry> = {
     },
     help: "story review [--auto]   人工审核（可疑重复、低置信度事实、冲突）",
   },
-  validate: {
-    run: async () => {
-      const { cmdValidate } = await import("./cmd/validate.js");
-      return cmdValidate();
-    },
-    help: "story validate   检查数据库完整性",
-  },
   ask: {
     run: async (args) => {
       const { cmdAsk } = await import("./cmd/ask.js");
       if (!args.positional.length) throw new Error("用法：story ask <问题>");
       return cmdAsk(args.positional.join(" "), args.flags);
     },
-    help: "story ask <问题> [--chapter N] [--provider openai|mock]   基于结构化数据回答（--chapter 临时覆盖阅读进度）",
-  },
-  character: {
-    run: async (args) => {
-      const { cmdCharacter } = await import("./cmd/character.js");
-      const name = args.positional.join(" ");
-      if (!name) throw new Error("用法：story character <人物名>");
-      return cmdCharacter(name);
-    },
-    help: "story character <人物名>   查看人物卡片（受 userChapter 约束）",
+    help: "story ask <问题> [--chapter N] [--provider openai|mock]   基于结构化数据回答（人物卡片/无剧透问答；--chapter 临时覆盖阅读进度）",
   },
   stats: {
     run: async () => {
       const { cmdStats } = await import("./cmd/stats.js");
       return cmdStats();
     },
-    help: "story stats   数据与成本统计",
-  },
-  "audit-spoilers": {
-    run: async (args) => {
-      const { cmdAuditSpoilers } = await import("./cmd/spoilers.js");
-      return cmdAuditSpoilers(args.flags);
-    },
-    help: "story audit-spoilers [--chapter N]   Reader 可见性审计（验证 Reader API 不泄露超出 userChapter 的数据）",
+    help: "story stats   数据与成本统计 + 构建性能 + 完整性校验（含 story validate；严重错误 → exit 1）",
   },
   audit: {
     run: async (args) => {
       const { cmdAuditSpoilers } = await import("./cmd/spoilers.js");
       return cmdAuditSpoilers(args.flags);
     },
-    help: "story audit [--chapter N]   Reader 可见性审计（audit-spoilers 的别名）",
+    help: "story audit [--chapter N]   Reader 可见性审计（验证 Reader API 不泄露超出 userChapter 的数据）",
   },
   tui: {
     run: async (args) => {
       const { cmdTui } = await import("./cmd/tui.js");
       return cmdTui(args.flags);
     },
-    help: "story tui [--provider openai|mock]   交互式小说问答界面（TUI，支持 / 斜杠命令：/build /import /validate /review /audit /stats /context /help；未初始化时会询问是否初始化）",
+    help: "story tui [--provider openai|mock]   交互式小说问答界面（TUI，支持 / 斜杠命令：/help /chapter /build /import /status /review /audit /clear /exit；未初始化时会询问是否初始化）",
   },
 };
 
