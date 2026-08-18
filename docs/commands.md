@@ -206,3 +206,26 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 5. **能力/技能不是实体类型**：`ENTITY_TYPES` 仅 `character|organization|location|item|concept`。
 6. **import 会清空全部旧数据**；build 的 `failed` 批次不会被跳过，重跑自动重试。
 7. **三个概念不要混**：`availableThrough`（导入到哪）/ `builtThrough`（构建到哪）/ `userChapter`（读到哪）。
+
+---
+
+## 6. TUI 界面化命令（/settings /login /logout）
+
+靠齐 pi code agent：交互式设置走 pi-tui 的 overlay 组件，LLM 连接走引导式向导。实现全部在 `src/cli/tui/menus.ts`，命令入口/补全在 `src/cli/tui/commands.ts`（`SLASH_COMMANDS` 注册），弹出能力由 `app.ts` 经 `CommandContext.ui` 注入（`openSettings` / `openLogin`）。
+
+### `/settings` — 交互式设置菜单
+- `openSettingsOverlay(tui, deps)` 用 pi-tui `SettingsList` 组件渲染全部配置项（reader / llm / build，含价格与推理参数）。
+- Enter/Space 修改：字符串/数字走 `Input` 子菜单（子菜单内校验数字合法性），枚举/布尔（thinkingFormat / extractReasoning / autoBatch / agentExtract / sessionLog）走 `values` 循环。
+- `/` 启用搜索过滤；Esc 关闭 overlay。
+- 每次改动立即 `saveConfig` 写 `.story/config.json`；`userChapter` 即时生效（`repo.setUserChapter` + 工具上下文 + `agent.reset()` 清历史防泄露）。
+- `llm.apiKey` 显示掩码 `••••xxxx`，编辑留空 = 保留原值（清除走 `/logout`）；其余字符串留空 = 删除该键、回退环境变量。
+
+### `/login` — 引导式 LLM 连接向导
+- `openLoginOverlay(tui, deps)` 弹出自定义 `LoginWizard` 组件（overlay），分步：`baseUrl` → `apiKey` → `model` → **测试连接** → **保存并完成**；Esc 取消。
+- 测试连接：用当前输入合并出临时 config → `createProvider(cfg)` → `provider.complete([…], { stream:false, reasoning:"off" })`，成功显示模型名与回复、失败显示错误；连接信息不完整则提示将用 mock。
+- 保存：写入 `cfg.llm.{baseUrl,apiKey,model}` 并 `saveConfig`；留空项删除（回退环境变量）；完成后摘要经 `onNotify` 渲染到聊天区。
+- 语义：环境变量 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL` 始终优先于 config（`resolveLlmSettings`），`/login` 只是把连接写进 config。
+
+### `/logout` — 清除已保存的 LLM 连接凭据
+- `clearLlmConnection(cfg)` 删除 `llm.baseUrl / llm.apiKey / llm.model`（保留价格与推理参数），`saveConfig` 后返回摘要。
+- 环境变量中的凭据不受影响；当前已加载的 provider 需重启 TUI 后按新配置重建。

@@ -22,7 +22,7 @@
 
 相关代码范围（触及即触发同步义务）：
 `src/cli/commands/*`（尤其 `init`/`import`/`build`/`ask`/`stats`/`audit`/`tui`）、`src/build/*`、`src/reader/*`、`src/llm/*`、`src/db/*`、`src/novel/*`、`src/config.ts`、`src/cli/tui/commands.ts`（其 `/build /import /status` 等斜杠命令复用上述流程）。
-> 当前命令面（精简后）：CLI = `init import build ask review audit stats tui`（原 `validate` 并入 `stats`、`character` 并入 `ask`、`audit-spoilers` 并入 `audit`）；TUI = `/help /status /config /chapter /build /import /review /audit /clear /exit`（`/status` 合并原 `/context /stats /progress /validate`；`/config` 按组 llm/build/reader 查看与修改配置，LLM/构建项保存后需重启 TUI 生效）。增减命令同样需要同步文档。
+> 当前命令面（精简后）：CLI = `init import build ask review audit stats tui`（原 `validate` 并入 `stats`、`character` 并入 `ask`、`audit-spoilers` 并入 `audit`）；TUI = `/help /status /settings /login /logout /config /chapter /build /import /review /audit /clear /exit`（`/status` 合并原 `/context /stats /progress /validate`；`/settings` 为交互式设置菜单、`/login` 为引导式 LLM 连接向导、`/logout` 清除已保存的 LLM 连接凭据；`/config` 按组 llm/build/reader 查看与修改配置，LLM/构建项保存后需重启 TUI 生效）。增减命令同样需要同步文档。
 
 ## 常用命令
 ```bash

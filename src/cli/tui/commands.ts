@@ -7,6 +7,13 @@ import { StoryConfig, saveConfig } from "../../config.js";
 import { LlmProvider } from "../../llm/types.js";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { SlashCommand } from "@earendil-works/pi-tui";
+import { clearLlmConnection } from "./menus.js";
+
+/** TUI 界面化命令能力（/settings、/login 由 app.ts 注入，负责弹出交互式覆盖层） */
+export interface TuiUi {
+  openSettings(): void;
+  openLogin(): void;
+}
 
 export interface CommandContext {
   repo: StoryRepo;
@@ -20,6 +27,8 @@ export interface CommandContext {
   agent?: Agent;
   /** 进度回调（build 等长任务每批完成时触发，TUI 实时更新） */
   onProgress?: (text: string) => void;
+  /** 界面化命令（/settings /login） */
+  ui?: TuiUi;
 }
 
 export interface CommandResult {
@@ -34,6 +43,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "help", description: "显示所有可用命令" },
   { name: "status", description: "工作区状态：数据量/成本/构建性能/进度/完整性校验" },
   { name: "config", description: "查看/修改配置（分组：llm / build / reader）", argumentHint: "[组] 或 [key=value]" },
+  { name: "settings", description: "交互式设置菜单（↑/↓ + Enter/Space 修改）" },
+  { name: "login", description: "引导式配置 LLM 连接（baseUrl → apiKey → model → 测试）" },
+  { name: "logout", description: "清除已保存的 LLM 连接凭据（baseUrl/apiKey/model）" },
   { name: "chapter", description: "查看/切换当前阅读进度（Ask 防剧透边界）", argumentHint: "<章节号>" },
   { name: "build", description: "构建知识库（Agent 化抽取，失败即停）", argumentHint: "[--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]" },
   { name: "import", description: "导入小说文件（会清空现有数据）", argumentHint: "<文件路径>" },
@@ -109,6 +121,9 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           "|------|------|",
           "| `/help` | 显示此帮助 |",
           "| `/status` | 工作区状态：数据量 / LLM 成本 / 构建性能 / 处理进度 / 完整性校验（合并了原 /context /stats /progress /validate） |",
+          "| `/settings` | 交互式设置菜单（↑/↓ 选择 · Enter/Space 修改 · `/` 搜索 · Esc 关闭） |",
+          "| `/login` | 引导式配置 LLM 连接（baseUrl → apiKey → model → 测试 → 保存） |",
+          "| `/logout` | 清除已保存的 LLM 连接凭据 |",
           "| `/config` | 查看/修改配置（分组：`/config llm`、`/config build`、`/config reader`；设置如 `/config llm.model=deepseek-v4-flash`） |",
           "| `/chapter <N>` | 切换当前阅读进度（Ask 防剧透边界，默认第 1 章） |",
           "| `/build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]` | 构建知识库（Agent 化抽取：模型自己检索已有实体；--no-agent 回退注入式，--keep-going 失败后继续） |",
@@ -425,6 +440,29 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       return { text: lines.join("\n") };
     }
 
+    // ── 界面化：交互式设置菜单（pi code agent 风格，Esc 关闭） ──
+    case "settings": {
+      ctx.ui?.openSettings();
+      return { text: "已打开设置菜单：↑/↓ 选择 · Enter/Space 修改 · `/` 搜索 · Esc 关闭。" };
+    }
+
+    // ── 界面化：引导式 LLM 连接向导 ──
+    case "login": {
+      ctx.ui?.openLogin();
+      return { text: "已打开 LLM 登录向导：baseUrl → apiKey → model → 测试连接 → 保存（Esc 取消）。" };
+    }
+
+    // ── 登出：清除已保存的 LLM 连接凭据 ──
+    case "logout": {
+      const had = clearLlmConnection(cfg);
+      saveConfig(cfg);
+      return {
+        text: had
+          ? "## 已登出\n已清除 `.story/config.json` 中保存的 LLM 连接凭据（baseUrl / apiKey / model）。\n\n> 环境变量（`LLM_BASE_URL` 等）不受影响，仍会生效；当前已加载的 provider 需重启 TUI 后按新配置重建。"
+          : "## 登出\n当前没有已保存的 LLM 连接凭据（如已通过环境变量 `LLM_API_KEY` 等配置，仍会生效）。",
+      };
+    }
+
     // ── 配置（分组查看 + 修改，类似 code agent 的 /config） ──
     case "config": {
       const arg = positional[0] ?? "";
@@ -483,7 +521,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
 
 /** 命令列表提示（用于未知命令） */
 export function commandHint(): string {
-  return "可用命令：`/help`、`/status`、`/config`、`/chapter`、`/build`、`/import`、`/review`、`/audit`、`/clear`、`/exit`";
+  return "可用命令：`/help`、`/status`、`/settings`、`/login`、`/logout`、`/config`、`/chapter`、`/build`、`/import`、`/review`、`/audit`、`/clear`、`/exit`";
 }
 
 // ── 配置分组（/config） ──────────────────────────────

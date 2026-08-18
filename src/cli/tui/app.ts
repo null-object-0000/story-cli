@@ -30,6 +30,7 @@ import { StoryRepo } from "../../db/repo.js";
 import { StoryConfig } from "../../config.js";
 import { LlmProvider } from "../../llm/types.js";
 import { runSlashCommand, commandHint, SLASH_COMMANDS } from "./commands.js";
+import { openLoginOverlay, openSettingsOverlay } from "./menus.js";
 import { estimateTokens } from "../../util.js";
 
 // ── 简单主题 ──────────────────────────────────────
@@ -151,6 +152,13 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
     }
   });
 
+  // 界面化命令（/login 等）完成后向聊天区输出摘要
+  function notifyChat(text: string): void {
+    chatContainer.addChild(new Markdown(text, 1, 0, theme));
+    chatContainer.addChild(new Spacer(1));
+    tui.requestRender();
+  }
+
   // ── 布局 ──
 
   // Layout: topBar (auto) + chat history (grow) + editor (auto) + bottomBar (auto)
@@ -234,6 +242,12 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
             }
             streamSlot.addChild(new Markdown(text, 1, 0, theme));
             tui.requestRender();
+          },
+          ui: {
+            openSettings: () =>
+              openSettingsOverlay(tui, { cfg, repo, toolCtx, focus, agent, onNotify: notifyChat }),
+            openLogin: () =>
+              openLoginOverlay(tui, { cfg, repo, toolCtx, focus, agent, onNotify: notifyChat }),
           },
         });
         if (hasProgress) {
