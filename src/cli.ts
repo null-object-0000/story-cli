@@ -20,8 +20,8 @@ function parseArgs(argv: string[]): { command: string; positional: string[]; fla
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
   const expectVal = new Set<string>([
-    "--max-chapter", "--to-chapter", "--from-chapter", "--batch-size", "--retries",
-    "--provider", "--model", "--book", "--user-chapter", "--parallel",
+    "--from-chapter", "--to-chapter", "--batch-size", "--retries",
+    "--provider", "--model", "--book", "--user-chapter", "--chapter", "--parallel",
   ]);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
@@ -48,22 +48,22 @@ const commands: Record<string, CommandEntry> = {
       const { cmdInit } = await import("./cmd/init.js");
       return cmdInit(args);
     },
-    help: "story init [--max-chapter N] [--book 书名]     创建项目",
+    help: "story init [--book 书名] [--user-chapter N]     创建项目（默认 userChapter=1）",
   },
   import: {
     run: async (args) => {
       const { cmdImport } = await import("./cmd/import.js");
-      if (!args.positional.length) throw new Error("用法：story import <小说文件路径> [--to-chapter N]");
-      return cmdImport({ path: args.positional[0], toChapter: parseNum(args.flags["--to-chapter"]), book: args.flags["--book"] as string | undefined });
+      if (!args.positional.length) throw new Error("用法：story import <小说文件路径>");
+      return cmdImport({ path: args.positional[0], book: args.flags["--book"] as string | undefined });
     },
-    help: "story import <文件路径> [--to-chapter N]          导入小说（截断到第 N 章）",
+    help: "story import <文件路径>   导入整本小说（识别到的所有章节；availableThrough 自动决定）",
   },
   build: {
     run: async (args) => {
       const { cmdBuild } = await import("./cmd/build.js");
       return cmdBuild(args.flags, args.positional);
     },
-    help: "story build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going] [--provider openai|mock] [--retries N]  抽取结构化数据（Agent 化抽取，失败即停）",
+    help: "story build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going] [--provider openai|mock] [--retries N]  抽取结构化数据（默认构建已导入未构建的全部章节；--to N 为本次构建任务结束章节）",
   },
   review: {
     run: async (args) => {
@@ -85,7 +85,7 @@ const commands: Record<string, CommandEntry> = {
       if (!args.positional.length) throw new Error("用法：story ask <问题>");
       return cmdAsk(args.positional.join(" "), args.flags);
     },
-    help: "story ask <问题> [--provider openai|mock]   基于结构化数据回答问题",
+    help: "story ask <问题> [--chapter N] [--provider openai|mock]   基于结构化数据回答（--chapter 临时覆盖阅读进度）",
   },
   character: {
     run: async (args) => {
@@ -94,7 +94,7 @@ const commands: Record<string, CommandEntry> = {
       if (!name) throw new Error("用法：story character <人物名>");
       return cmdCharacter(name);
     },
-    help: "story character <人物名>   查看人物卡片",
+    help: "story character <人物名>   查看人物卡片（受 userChapter 约束）",
   },
   stats: {
     run: async () => {
@@ -104,18 +104,18 @@ const commands: Record<string, CommandEntry> = {
     help: "story stats   数据与成本统计",
   },
   "audit-spoilers": {
-    run: async () => {
+    run: async (args) => {
       const { cmdAuditSpoilers } = await import("./cmd/spoilers.js");
-      return cmdAuditSpoilers();
+      return cmdAuditSpoilers(args.flags);
     },
-    help: "story audit-spoilers   防剧透审计（检查是否包含超限章节数据）",
+    help: "story audit-spoilers [--chapter N]   Reader 可见性审计（验证 Reader API 不泄露超出 userChapter 的数据）",
   },
   audit: {
-    run: async () => {
+    run: async (args) => {
       const { cmdAuditSpoilers } = await import("./cmd/spoilers.js");
-      return cmdAuditSpoilers();
+      return cmdAuditSpoilers(args.flags);
     },
-    help: "story audit   audit-spoilers 的别名",
+    help: "story audit [--chapter N]   Reader 可见性审计（audit-spoilers 的别名）",
   },
   tui: {
     run: async (args) => {
@@ -143,11 +143,11 @@ function helpText(): string {
     "  （真实环境变量优先于 .env 文件）",
     "",
     "更多信息与验证用例：",
-    "  story init --max-chapter 405 --book 我不是戏神",
-    "  story import <小说文件> --to-chapter 405",
+    "  story init --book 我不是戏神",
+    "  story import <小说文件>",
     "  story build",
-    "  story ask 闻人佑是谁来着？",
-    "  story audit-spoilers",
+    "  story ask 闻人佑是谁来着？ --chapter 405",
+    "  story audit --chapter 405",
   ];
   return lines.join("\n");
 }
@@ -174,12 +174,6 @@ async function main(): Promise<number> {
     console.error(`[error] ${msg}`);
     return 1;
   }
-}
-
-function parseNum(v: string | boolean | undefined): number | undefined {
-  if (typeof v !== "string") return undefined;
-  const n = parseInt(v, 10);
-  return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
 main().then((code) => {

@@ -2,7 +2,7 @@
 
 import { StoryConfig } from "../config.js";
 
-export function buildAgentSystemPrompt(cfg: { book: string; maxChapter: number; userChapter: number }): string {
+export function buildAgentSystemPrompt(cfg: { book: string; userChapter: number }): string {
   return `你是一个小说阅读记忆助手。你正在帮助读者回忆小说《${cfg.book}》中的人物和情节。
 
 ## 核心约束

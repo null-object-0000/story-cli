@@ -130,7 +130,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
     case "context": {
       const c = repo.counts();
       const chapters = repo.countChapters();
-      const dbMax = repo.maxChapterInDb() ?? 0;
+      const availableThrough = repo.availableThrough() ?? 0;
+      const builtThrough = repo.builtThrough();
       const focus = (ctx as any).focus ?? null;
       const focusLine = focus?.from != null
         ? `章节焦点：第 ${focus.from} ～ ${focus.to} 章`
@@ -147,7 +148,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           "",
           "| 项目 | 数值 |",
           "|------|------|",
-          `| 数据库总章节 | ${chapters} / ${cfg.maxChapter} |`,
+          `| 已导入章节 | ${chapters}（availableThrough = ${availableThrough}） |`,
+          `| 已构建章节 | ${builtThrough ?? 0}（builtThrough） |`,
           `| 当前阅读进度 | **第 ${cfg.userChapter} 章**（/chapter 切换） |`,
           `| 实体 | ${c.entities} |`,
           `| 事实 | ${c.facts} |`,
@@ -176,10 +178,10 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       if (!Number.isInteger(n) || n < 1) {
         return { text: `无效章节号：${nArg}，请输入正整数。` };
       }
-      const dbMax = repo.maxChapterInDb() ?? cfg.maxChapter;
-      const max = Math.max(cfg.maxChapter, dbMax);
-      if (n > max) {
-        return { text: `章节号 ${n} 超过最大章节 ${max}。` };
+      // 上限 = 已导入章节数（availableThrough），不是配置
+      const max = repo.availableThrough() ?? 0;
+      if (max > 0 && n > max) {
+        return { text: `章节号 ${n} 超过已导入的最大章节 ${max}（可用 story import 导入更多章节）。` };
       }
       // 更新 config
       cfg.userChapter = n;
@@ -198,7 +200,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
         ctx.focus.from = null;
         ctx.focus.to = null;
       }
-      return { text: `✅ 阅读进度已切换为 **第 ${n} 章**（对话已重置，之前的上下文已清除）。\n\n之后所有检索只返回 ≤ 第 ${n} 章的数据。\n> 当前工作区过滤边界：${repo.userChapter} 章（${repo.userChapter < cfg.maxChapter ? `收窄，仅 ${repo.userChapter} 章前数据可见` : '全量数据可见'}）\n> 注意：这不会影响已构建的结构化数据，只是 Ask 检索的过滤边界。`, suggestClear: true };
+      return { text: `✅ 阅读进度已切换为 **第 ${n} 章**（对话已重置，之前的上下文已清除）。\n\n之后所有检索只返回 ≤ 第 ${n} 章的数据。\n> 当前工作区过滤边界：${repo.userChapter} 章（${n < max ? `收窄，仅 ${n} 章前数据可见` : '全量数据可见'}）\n> 注意：这不会影响已构建的结构化数据，只是 Ask 检索的过滤边界。`, suggestClear: true };
     }
 
     // ── 构建知识库 ──
@@ -283,7 +285,6 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
           batchSize: typeof flags["--batch-size"] === "number"
             ? flags["--batch-size"] as number
             : (cfg.build?.batchSize ?? undefined),
-          maxChapter: cfg.maxChapter,
           concurrency: 1,
           autoBatch: flags["--auto-batch"] === true || (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? false)),
           failFast: !(flags["--keep-going"] === true),
@@ -335,7 +336,6 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       const { result, output } = await captureConsole(() =>
         cmdImport({
           path: absPath,
-          toChapter: typeof flags["--to"] === "number" ? flags["--to"] as number : undefined,
         })
       );
       const lines = [
@@ -409,7 +409,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
     case "stats": {
       const c = repo.counts();
       const chapters = repo.countChapters();
-      const dbMax = repo.maxChapterInDb() ?? 0;
+      const dbMax = repo.availableThrough() ?? 0;
+      const builtThrough = repo.builtThrough();
       const llm = repo.llmLogSummary();
       const byPhase = repo.db
         .prepare("SELECT phase, COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output, SUM(retries) AS retries, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures FROM llm_logs GROUP BY phase")
@@ -419,7 +420,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
 
       // 结构化数据
       const structRows = [
-        ["章节", `${chapters}（上限 ${cfg.maxChapter}）`],
+        ["已导入章节", `${chapters}（availableThrough = ${dbMax}）`],
+        ["已构建章节", `${builtThrough ?? 0}`],
         ["实体", `${c.entities}`],
         ["别名", `${c.aliases}`],
         ["事实", `${c.facts}`],
@@ -508,7 +510,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
 
     // ── 处理进度 ──
     case "progress": {
-      const dbMax = repo.maxChapterInDb() ?? 0;
+      const dbMax = repo.availableThrough() ?? 0;
       if (dbMax === 0) return { text: "chapters 表为空，请先执行 `/import` 导入小说。" };
       const batches = repo.listBatches(); // [{range: "1-5", status: "done"|"failed"}]
       const doneChapters = new Set<number>();

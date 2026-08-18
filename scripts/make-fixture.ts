@@ -1,15 +1,19 @@
 // 生成合成小说《我不是戏神（演示版）》：
-// 用于无 LLM API Key 时验证整条管道（import 截断 / build 抽取 / review / validate / ask / 防剧透）。
+// 用于无 LLM API Key 时验证整条管道（import / build 抽取 / review / validate / ask / 可见性审计）。
 // 内容由 src/llm/mockkb.ts 的规则驱动——mock 抽取器只“认识”这些句子，二者天然一致。
 //
-// 注意：第 405 章之后故意写入“剧透”内容（第 406 章起使用中文数字标题），
-// import 必须把它们全部丢弃——这是防剧透物理截断的直接验证。
+// V0.1 收口后的新理念：
+//   - 全部 420 章都会被导入（第 406~420 章用中文数字标题，顺带覆盖解析器两种写法）；
+//   - 全部 420 章都允许被 Build；
+//   - 第 406~420 章故意放入【未来内容】（未来人物/能力/身份/别名/MemoryAnchor/事件），
+//     它们确实存在于完整 DB（Fact A），但 userChapter=405 的 Reader 必须完全不可见（Fact B）。
 
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   MOCK_ABILITIES,
+  MOCK_ALIAS_RULES,
   MOCK_ANCHORS,
   MOCK_CHARACTERS,
   MOCK_DUPLICATES,
@@ -73,7 +77,7 @@ function titleFor(n: number): string {
 }
 
 function chapterHeader(n: number): string {
-  // 405 章之后用中文数字标题，验证解析器同时支持两种写法
+  // 第 406 章之后用中文数字标题，验证解析器同时支持两种写法（仍会被导入与构建）
   return n > MAX ? `第${cn(n)}章` : `第${n}章`;
 }
 
@@ -102,6 +106,16 @@ function bodyFor(n: number): string[] {
     // 第一次出现栾梅的章节给出身份线索
     if (n === 100) out.push(`　　${d.entityA}，人称${d.entityB}，是京城那家戏院的台柱。`);
   }
+  for (const al of MOCK_ALIAS_RULES) {
+    if (al.fromChapter === n) out.push(`　　有人低声唤${al.entity}的另一个称呼——${al.alias}。`);
+  }
+
+  // 首次登场的未来人物（firstChapter > MAX）：写出其名字 + 别名，供 mock 抽取
+  for (const ch of MOCK_CHARACTERS) {
+    if (ch.firstChapter === n && ch.firstChapter > MAX) {
+      out.push(`　　${ch.name}${ch.aliases.length ? `（人称${ch.aliases.join("、")}）` : ""}的身影出现在眼前。`);
+    }
+  }
 
   // 每章固定的“在场人物”句，用于制造出场记录与同场事件
   const cast = MOCK_CHARACTERS.filter((c) => c.firstChapter <= n).slice(0, 4);
@@ -115,19 +129,6 @@ function bodyFor(n: number): string[] {
   return out;
 }
 
-function futureBodyFor(n: number): string[] {
-  const out: string[] = [];
-  if (n === 406) {
-    out.push(`　　（剧透禁区示例）北境的寒风里，闻人佑拉着的板车换成了战车。`);
-    out.push(`　　三师兄的角色，将在三百章后彻底改变。`);
-  } else if (n === 410) {
-    out.push(`　　（剧透禁区示例）陈伶的织命丝线缠绕住整座城池，审判庭落下帷幕。`);
-  } else {
-    out.push(`　　（第${n}章内容，属于第 ${MAX + 1} 章之后，绝不允许进入任何处理流程。）`);
-  }
-  return out;
-}
-
 export function buildNovelText(): string {
   const lines: string[] = [];
   lines.push("我不是戏神（合成演示版，由 scripts/make-fixture.ts 生成，仅供离线验证）");
@@ -136,11 +137,7 @@ export function buildNovelText(): string {
   for (let n = 1; n <= TOTAL; n++) {
     lines.push(`${chapterHeader(n)} ${titleFor(n)}`);
     lines.push("");
-    if (n <= MAX) {
-      lines.push(...bodyFor(n));
-    } else {
-      lines.push(...futureBodyFor(n));
-    }
+    lines.push(...bodyFor(n));
     lines.push("");
   }
   return lines.join("\n");
@@ -150,7 +147,7 @@ function main(): void {
   const target = join(__dirname, "..", "..", "assets", "demo-novel.txt");
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, buildNovelText(), "utf-8");
-  console.log(`已生成合成小说：${target}（共 ${TOTAL} 章，含 ${TOTAL - MAX} 章“剧透禁区”）`);
+  console.log(`已生成合成小说：${target}（共 ${TOTAL} 章，含 ${TOTAL - MAX} 章“未来内容”供可见性验证）`);
 }
 
 if (process.argv[1] && process.argv[1].endsWith("make-fixture.js")) {

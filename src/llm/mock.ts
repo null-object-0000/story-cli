@@ -8,6 +8,7 @@ import { ExtractionInput, ExtractionResult, LlmProvider } from "./types.js";
 import { estimateTokens } from "../util.js";
 import {
   MOCK_ABILITIES,
+  MOCK_ALIAS_RULES,
   MOCK_ANCHORS,
   MOCK_CHARACTERS,
   MOCK_DUPLICATES,
@@ -65,6 +66,14 @@ export class MockProvider implements LlmProvider {
             aliases.push({ entityName: ch.name, alias: al, fromChapter: ch.firstChapter });
           }
         }
+      }
+    }
+
+    // 额外别名规则：别名在指定章节（非首章）首次出现（如未来别名）
+    for (const rule of MOCK_ALIAS_RULES) {
+      const a = all.find((x) => x.chapter === rule.fromChapter);
+      if (a && rule.keywords.every((k) => mentions(a.text, k))) {
+        aliases.push({ entityName: rule.entity, alias: rule.alias, fromChapter: rule.fromChapter });
       }
     }
 

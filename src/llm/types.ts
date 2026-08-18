@@ -60,7 +60,6 @@ export interface ExtractionInput {
   knownEntities: KnownEntityDigest[];
   aliases: { alias: string; entityId: string; entityName: string }[];
   previousSummary: string | null;
-  maxChapter: number;
 }
 
 export interface LlmCapabilities {

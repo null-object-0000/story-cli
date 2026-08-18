@@ -71,6 +71,14 @@ export interface MockDuplicateRule {
   keywords: string[];
 }
 
+/** 额外别名规则：别名在指定章节（非首章）首次出现（用于未来别名防剧透测试） */
+export interface MockAliasRule {
+  entity: string;
+  alias: string;
+  fromChapter: number;
+  keywords: string[];
+}
+
 export const MOCK_CHARACTERS: MockCharacter[] = [
   { name: "陈伶", aliases: ["红心6", "篡火者13号"], firstChapter: 1, protagonist: true },
   { name: "闻人佑", aliases: ["三师兄", "老三"], firstChapter: 392 },
@@ -79,6 +87,8 @@ export const MOCK_CHARACTERS: MockCharacter[] = [
   { name: "白也", aliases: [], firstChapter: 60 },
   { name: "林宴", aliases: ["记者林宴"], firstChapter: 210 },
   { name: "大师兄", aliases: ["大师兄"], firstChapter: 391, type: "character" },
+  // V0.1 收口：未来章节（406~420）故意放入的未来人物——Reader（userChapter=405）必须不可见
+  { name: "未来人物", aliases: ["未来代号"], firstChapter: 410, type: "character" },
 ];
 
 export const MOCK_FACTS: MockFactRule[] = [
@@ -90,6 +100,9 @@ export const MOCK_FACTS: MockFactRule[] = [
   { entity: "陈伶", type: "status", value: "戏道古藏修行弟子", chapter: 392, keywords: ["陈伶", "戏道古藏"], confidence: 0.93 },
   { entity: "栾梅", type: "identity", value: "也拥有戏鬼血统", chapter: 100, keywords: ["栾梅", "戏鬼血统"], confidence: 0.9 },
   { entity: "白也", type: "role", value: "盗神道的前辈，将【借月】传承给陈伶", chapter: 170, keywords: ["白也", "借月"], confidence: 0.95 },
+  // 未来身份（第 415 章）：userChapter=405 时不可见；userChapter=600 时可看到「未来首领」
+  { entity: "陈伶", type: "status", value: "未来首领", chapter: 415, keywords: ["陈伶", "未来首领"], confidence: 0.92 },
+  { entity: "未来人物", type: "identity", value: "来自未来的神秘角色", chapter: 410, keywords: ["未来人物", "未来代号"], confidence: 0.95 },
 ];
 
 export const MOCK_ANCHORS: MockAnchorRule[] = [
@@ -138,6 +151,16 @@ export const MOCK_ANCHORS: MockAnchorRule[] = [
     memorability: 0.85,
     protagonistRelevance: 0.8,
   },
+  // 未来 MemoryAnchor（第 419 章）：userChapter=405 时不可见
+  {
+    entity: "闻人佑",
+    chapter: 419,
+    summary: "未来的画面：闻人佑站在城墙上，回望来路。",
+    keywords: ["闻人佑", "未来画面"],
+    importance: 0.6,
+    memorability: 0.8,
+    protagonistRelevance: 0.5,
+  },
 ];
 
 export const MOCK_RELATIONS: MockRelationRule[] = [
@@ -168,6 +191,16 @@ export const MOCK_RELATIONS: MockRelationRule[] = [
     keywords: ["白也", "借月"],
     confidence: 0.97,
   },
+  // 未来关系（第 413 章）：userChapter=405 时不可见
+  {
+    from: "陈伶",
+    to: "未来人物",
+    type: "盟约",
+    detail: "陈伶与未来人物结盟",
+    chapter: 413,
+    keywords: ["陈伶", "未来人物", "盟约"],
+    confidence: 0.9,
+  },
 ];
 
 export const MOCK_ABILITIES: MockAbilityRule[] = [
@@ -182,6 +215,8 @@ export const MOCK_ABILITIES: MockAbilityRule[] = [
   { entity: "陈伶", name: "通讯设备与电磁感应原理", category: "knowledge", system: null, path: null, level: null, source: null, acquiredChapter: 220, summary: "对现代通讯设备与电磁感应的原理性认知。", keywords: ["通讯设备", "电磁感应"], chapter: 220 },
   { entity: "陈伶", name: "织命", category: "ability", system: "戏道", path: "织", level: "7", source: null, acquiredChapter: 300, summary: "操纵命运丝线的能力。", keywords: ["织命"], chapter: 300 },
   { entity: "闻人佑", name: "念", category: "skill", system: "戏道", path: "基本功", level: null, source: null, acquiredChapter: null, summary: "戏曲基本功中的【念】，闻人佑负责传授。", keywords: ["闻人佑", "念"], chapter: 400 },
+  // 未来能力（第 412 章）：userChapter=405 时不可见
+  { entity: "陈伶", name: "未来之力", category: "ability", system: "戏道", path: "未来", level: null, source: null, acquiredChapter: 412, summary: "未来的高阶力量。", keywords: ["未来之力"], chapter: 412 },
 ];
 
 export const MOCK_EVENTS: MockEventRule[] = [
@@ -217,6 +252,21 @@ export const MOCK_EVENTS: MockEventRule[] = [
     keywords: ["闻人佑", "教"],
     importance: 0.6,
   },
+  // 未来事件（第 420 章）：userChapter=405 时不可见
+  // 注意 summary 不能以「第N章」开头——会被章节解析器误判为章节标题
+  {
+    chapter: 420,
+    participants: ["未来人物", "陈伶"],
+    type: "future",
+    summary: "未来人物与陈伶在城外完成一场重要会面。",
+    keywords: ["未来人物", "会面"],
+    importance: 0.6,
+  },
+];
+
+export const MOCK_ALIAS_RULES: MockAliasRule[] = [
+  // 未来别名（第 418 章）：userChapter=405 时 findByAlias 必须解析不到
+  { entity: "闻人佑", alias: "未来外号", fromChapter: 418, keywords: ["闻人佑", "未来外号"] },
 ];
 
 export const MOCK_DUPLICATES: MockDuplicateRule[] = [

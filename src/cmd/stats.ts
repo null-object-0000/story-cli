@@ -7,17 +7,21 @@ import { pad as padFlat } from "../util.js";
 
 export async function cmdStats(): Promise<number> {
   const cfg = loadConfig();
-  const repo = new StoryRepo(dbPath(), cfg.maxChapter);
+  const repo = new StoryRepo(dbPath());
   try {
     const c = repo.counts();
     const llm = repo.llmLogSummary();
+    const availableThrough = repo.availableThrough() ?? 0;
+    const builtThrough = repo.builtThrough();
     const byPhase = repo.db
       .prepare("SELECT phase, COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output, SUM(retries) AS retries, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures FROM llm_logs GROUP BY phase")
       .all() as { phase: string; calls: number; input: number; output: number; retries: number; failures: number }[];
 
     section("Stats");
     log(`Book            : ${cfg.book}`);
-    log(`Chapters in DB  : ${repo.countChapters()}（上限 ${cfg.maxChapter}）`);
+    log(`Chapters in DB  : ${repo.countChapters()}（availableThrough = ${availableThrough}）`);
+    log(`Built through   : ${builtThrough ?? 0}`);
+    log(`User chapter    : ${cfg.userChapter}`);
     log("");
     log(`Characters      : ${c.characters}`);
     log(`Entities        : ${c.entities}`);
@@ -47,8 +51,8 @@ export async function cmdStats(): Promise<number> {
       const avgOut = Math.round(llm.output / llm.calls);
       log(`平均每次调用  : in=${avgIn} out=${avgOut}`);
       log(`估算全本成本（按当前 token 使用率 × ${1900} 章）:`);
-      log(`  405 章消耗  : ${llm.input.toLocaleString()} in / ${llm.output.toLocaleString()} out`);
-      const ratio = 1900 / (repo.maxChapterInDb() ?? 405);
+      log(`  已构建 ${availableThrough} 章消耗  : ${llm.input.toLocaleString()} in / ${llm.output.toLocaleString()} out`);
+      const ratio = 1900 / Math.max(1, availableThrough);
       log(`  1900 章预计 : ${Math.round(llm.input * ratio).toLocaleString()} in / ${Math.round(llm.output * ratio).toLocaleString()} out`);
     }
     return 0;

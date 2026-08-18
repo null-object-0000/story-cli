@@ -1,6 +1,6 @@
 // 构建 STRUCTURED STORY DATA（结构化上下文）。
 // 这是 Ask 阶段给 LLM 的全部数据来源；只读结构化表，绝不读取 chapters 原文。
-// 所有条目天然满足 chapter <= maxChapter（DB CHECK 保证）。
+// 所有条目天然满足 chapter <= userChapter（StoryRepo 可见性过滤保证）。
 
 import { StoryRepo, EntityRow } from "../db/repo.js";
 import { Intent } from "./intent.js";
@@ -24,7 +24,7 @@ export interface EntityCard {
 }
 
 export interface StructuredContext {
-  meta: { book: string; maxChapter: number; userChapter: number; protagonistName?: string | null };
+  meta: { book: string; availableThrough: number; userChapter: number; protagonistName?: string | null };
   intent: Intent;
   question: string;
   matchedEntities: EntityCard[];        // 主要命中
@@ -55,7 +55,8 @@ export function buildEntityCard(repo: StoryRepo, entity: EntityRow, protagonistI
     .filter((f) => ["personality", "appearance", "habit", "description"].includes(f.type))
     .map((f) => ({ type: f.type, value: f.value, chapter: f.chapter, confidence: f.confidence }));
   const { first, last, count } = repo.firstAndLastAppearance(entity.id);
-  const uc = userChapter ?? repo.maxChapter;
+  // userChapter 缺省 = availableThrough（当前已导入的最大章节），Reader 路径总是显式传入
+  const uc = userChapter ?? repo.availableThrough() ?? 0;
   const anchors = topAnchors(repo.listMemoryAnchors(entity.id), uc, 5).map((a) => ({
     chapter: a.chapter,
     summary: a.summary,
@@ -111,14 +112,14 @@ export function buildEntityCard(repo: StoryRepo, entity: EntityRow, protagonistI
 
 export function buildContext(
   repo: StoryRepo,
-  cfg: { book: string; maxChapter: number; userChapter: number },
+  cfg: { book: string; userChapter: number },
   question: string,
   intent: Intent,
   hits: EntityHit[],
   opts: { abilityNames?: string[] } = {}
 ): StructuredContext {
     const protagonist = guessProtagonist(repo);
-  const meta = { book: cfg.book, maxChapter: cfg.maxChapter, userChapter: cfg.userChapter, protagonistName: protagonist?.name ?? null };
+  const meta = { book: cfg.book, availableThrough: repo.availableThrough() ?? 0, userChapter: cfg.userChapter, protagonistName: protagonist?.name ?? null };
   const cards = hits.slice(0, 3).map((h) => buildEntityCard(repo, h.entity, protagonist?.id ?? null, cfg.userChapter));
   const ctx: StructuredContext = { meta, intent, question, matchedEntities: cards };
 

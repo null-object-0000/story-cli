@@ -30,8 +30,8 @@ export interface NovelTool {
 export interface NovelToolContext {
   repo: StoryRepo;
   book: string;
-  /** 结构化总上限（全量章节数，仅用于展示/进度） */
-  maxChapter: number;
+  /** 当前已导入的最大章节（availableThrough，由 chapters 数据决定；仅用于展示/进度） */
+  availableThrough: number;
   /** 用户当前阅读进度（Ask 检索过滤边界：所有工具只返回 chapter <= userChapter 的数据） */
   userChapter: number;
   /** 当前工作区章节焦点（null 表示不限制，与 userChapter 叠加：final cap = min(focus.to, userChapter)） */
@@ -241,7 +241,7 @@ export function buildNovelTools(ctx: NovelToolContext): NovelTool[] {
     {
       name: "get_progress",
       label: "阅读进度",
-      description: "获取当前工作区信息：书名、阅读进度（用户当前读到第几章）、结构化总上限、主角、已读范围内的结构化数据量统计。回答「我现在读到哪了」或需要了解整体情况时调用。",
+      description: "获取当前工作区信息：书名、阅读进度（用户当前读到第几章）、已导入章节数（availableThrough）、已构建章节数（builtThrough）、主角、已读范围内的结构化数据量统计。回答「我现在读到哪了」或需要了解整体情况时调用。",
       parameters: Type.Object({}),
       execute: async () => {
         const protagonist = searchEntities(repo, "主角", 1)[0]?.entity ?? null;
@@ -249,7 +249,8 @@ export function buildNovelTools(ctx: NovelToolContext): NovelTool[] {
         return textResult(
           jsonText({
             book: ctx.book,
-            maxChapter: ctx.maxChapter,
+            availableThrough: ctx.availableThrough,
+            builtThrough: repo.builtThrough() ?? 0,
             userChapter: ctx.userChapter,
             protagonist: protagonist?.name ?? null,
             focus: ctx.focus,

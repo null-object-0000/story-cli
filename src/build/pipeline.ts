@@ -1,5 +1,6 @@
 // Build Pipeline：分批次 LLM 抽取 → schema 校验 → 入库 → 断点续跑 → 日志
-// 硬约束：任何抽取/入库行为只允许落在 [1, maxChapter] 范围内。
+// 硬约束：任何抽取/入库行为只允许落在【当前 Batch 范围】[start, end] 内（见 validation.ts）。
+// 默认构建范围 = 当前已导入但尚未构建的全部章节（availableThrough 起，builtThrough 续）。
 
 import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ChapterSlice, ExtractionInput } from "../llm/types.js";
@@ -16,7 +17,6 @@ export interface BuildOptions {
   force?: boolean;
   batchSize?: number;
   retries?: number;
-  maxChapter: number;
   concurrency?: number;
   /** 自适应合并：按模型上下文动态决定每批章节数（默认 true，取 cfg.build.autoBatch） */
   autoBatch?: boolean;
@@ -86,16 +86,20 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   skipped: number;
   failed: number;
 }> {
-  const maxChapter = opts.maxChapter;
   const batchSize = Math.max(1, opts.batchSize ?? 1);
   const retries = Math.max(0, opts.retries ?? 2);
 
   const chapterCount = repo.countChapters();
   if (chapterCount === 0) {
-    throw new Error("chapters 表为空，请先运行：story import <小说文件> --to-chapter <N>");
+    throw new Error("chapters 表为空，请先运行：story import <小说文件>");
   }
-  const dbMax = repo.maxChapterInDb() ?? 0;
-  const toChapter = clampInt(opts.toChapter ?? dbMax, 1, Math.min(dbMax, maxChapter));
+  // availableThrough：当前已导入的最大章节（由 chapters 数据自动决定，非配置）
+  const dbMax = repo.availableThrough() ?? 0;
+  if (dbMax === 0) {
+    throw new Error("chapters 表为空，请先运行：story import <小说文件>");
+  }
+  // --to-chapter 在本命令中是【本次构建任务的结束章节】（与 Reader 防剧透无关）；缺省 = 全部已导入章节
+  const toChapter = clampInt(opts.toChapter ?? dbMax, 1, dbMax);
   const fromChapter = clampInt(opts.fromChapter ?? 1, 1, toChapter);
 
   // ── 模型能力与预算（自适应分批用） ──
@@ -277,7 +281,6 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       knownEntities,
       aliases,
       previousSummary,
-      maxChapter,
     };
 
     // 调用 + 校验 + 重试
@@ -303,7 +306,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
             })
           : (bump("等待 LLM 响应（流式生成中）..."), await provider.extract(input));
         usage = res.usage;
-        bundle = validateExtractionOutput(res.output, maxChapter);
+        bundle = validateExtractionOutput(res.output, r.start, r.end);
         // 校验通过：记录结构化产出统计（准确度分析用）
         batchSessionLog?.write({
           t: "validated", range: key,

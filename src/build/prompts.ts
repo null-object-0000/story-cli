@@ -1,13 +1,21 @@
 // Build 阶段抽取 Prompt（LLM 可读原文）——Ask 阶段绝不使用本文件内容
+//
+// V0.1 收口：
+//   - chapter 校验范围从“1..整本最大章节”改为【当前 Batch 范围】startChapter..endChapter
+//     （Extraction Agent 只读这些章节，输出本批范围之外的章节 = 幻觉/数据错误）。
+//   - 实体引用契约：search_existing_entities 返回 canonical name（entity.name），
+//     最终 JSON 必须使用该 canonical name 作为 entityName/fromName/toName，
+//     不要用当前文本中的别名再创建实体（别名解析由工具完成）。
 
 import { ExtractionInput } from "../llm/types.js";
 
-const MAX_TOKEN = "__MAX_CHAPTER__";
+const START_TOKEN = "__START_CHAPTER__";
+const END_TOKEN = "__END_CHAPTER__";
 
 export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆助手"的【结构化数据抽取器】。
 
 你的任务是：阅读给定的小说章节文本，抽取对"读者恢复剧情记忆"有用的结构化数据。
-最终产品目标是：读者读到第${MAX_TOKEN}章时突然看到一个人名，问"这个人是谁来着？"，系统能只用你抽取的结构化数据回答。
+最终产品目标是：读者读到某一章时突然看到一个人名，问"这个人是谁来着？"，系统能只用你抽取的结构化数据回答。
 
 ## 抽取原则
 1. 准确率优先于覆盖率：宁可少抽，不要乱抽。不确定的信息降低 confidence（0.5~0.7），或干脆不抽。
@@ -20,8 +28,13 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
    - 重要经历 / 重要身份变化 / 与主角的重要交集
    - 组织、地点、重要概念（如果它们对记忆恢复有明显帮助）
    - MemoryAnchor：能帮助读者"瞬间想起这个人是谁"的、短小具体有画面感的瞬间（如"一路拉着装满戏台道具板车的高大男人"）。判断标准：这个人物100章以后突然再次出现，这条信息是否可能让读者想起他？
-4. 所有记录必须带 chapter（章节号），chapter 必须在 1 到 ${MAX_TOKEN} 之间。超过 ${MAX_TOKEN} 的记录一律不得输出（这是防剧透的硬约束）。
-5. entity 引用优先使用已知实体的 entityId；新实体用 entityName 给出，我会按名称合并。
+4. 所有记录必须带 chapter（章节号），chapter 必须在 __START_CHAPTER__ 到 __END_CHAPTER__ 之间（当前 Batch 范围）。本批只阅读了这些章节，输出本批范围之外的章节一律视为幻觉/数据错误，不得输出。
+5. 能力记录中：chapter 是"读者在本批第几章得知这条能力"（知识可用章节）；acquiredChapter 是"故事内获得该能力的章节"（如本批文本提到过去获得，可写更早的章节，但不能超过本批末章）。
+6. 【实体引用契约·重要】当你调用 search_existing_entities 检索到已有实体时，返回结果中的 name 是 canonical name（正式名）。最终 JSON 中引用该实体时：
+   - 必须使用工具返回的 canonical name 作为 entityName / fromName / toName；
+   - 不要使用当前文本中出现的别名再次创建实体（工具已通过别名定位到该实体）；
+   - 只有当某个名字检索后【未命中任何已有实体】时，才把它当作新实体（newEntities）。
+7. 能力的归属：明确命名的能力优先放入 abilities；不要在 facts 中重复写同一条能力（避免同一信息两处记录）。
 
 ## 输出格式
 只输出一个 JSON 对象，不要输出任何其他文字。格式：
@@ -49,11 +62,11 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
 6. 没有内容的字段（如新能力无 system/path/level、事件无 participants）一律省略，不要输出 null / "" / [] 等空壳字段。`;
 
 export function buildExtractionPrompt(input: ExtractionInput): { system: string; user: string } {
-  const system = EXTRACTION_SYSTEM_PROMPT.replaceAll(MAX_TOKEN, String(input.maxChapter));
+  const system = EXTRACTION_SYSTEM_PROMPT.replaceAll(START_TOKEN, String(input.startChapter)).replaceAll(END_TOKEN, String(input.endChapter));
 
   const knownEntities = input.knownEntities
     .slice(0, 800)
-    .map((e) => `${e.id}（${e.name}）`)
+    .map((e) => `${e.name}（id=${e.id}，type=${e.type}）`)
     .join("，");
 
   const aliases = input.aliases
@@ -65,7 +78,7 @@ export function buildExtractionPrompt(input: ExtractionInput): { system: string;
     .map((t) => `【第${t.chapter}章 ${t.title}】\n${t.text.slice(0, 8000)}`)
     .join("\n\n");
 
-  const user = `## 已存在的实体（尽量复用其 entityId / entityName，避免重复创建）
+  const user = `## 已存在的实体（canonical name 用 name 字段；最终 JSON 引用时请用 canonical name，不要用别名再建实体）
 ${knownEntities || "（暂无）"}
 
 ## 已存在的别名映射

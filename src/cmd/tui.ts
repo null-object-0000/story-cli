@@ -23,7 +23,7 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
     cfg = loadConfig();
   }
 
-  const repo = new StoryRepo(dbPath(), cfg.maxChapter);
+  const repo = new StoryRepo(dbPath());
 
   try {
     const providerFlag = flags["--provider"];
@@ -41,7 +41,7 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
     const toolCtx: NovelToolContext = {
       repo,
       book: cfg.book,
-      maxChapter: cfg.maxChapter,
+      availableThrough: repo.availableThrough() ?? 0,
       userChapter: cfg.userChapter,
       focus: { from: null, to: null },
     };

@@ -55,7 +55,7 @@ export async function askAgent(
   const toolCtx: NovelToolContext = {
     repo,
     book: cfg.book,
-    maxChapter: cfg.maxChapter,
+    availableThrough: repo.availableThrough() ?? 0,
     userChapter: cfg.userChapter,
     focus: { from: null, to: null },
   };

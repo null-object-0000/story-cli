@@ -12,7 +12,7 @@ import { log, warn } from "../logger.js";
 
 export async function cmdAsk(question: string, flags: Record<string, string | boolean>): Promise<number> {
   const cfg = loadConfig();
-  const repo = new StoryRepo(dbPath(), cfg.maxChapter);
+  const repo = new StoryRepo(dbPath());
   try {
     const providerFlag = flags["--provider"];
     if (providerFlag && providerFlag !== "openai" && providerFlag !== "mock") {
@@ -23,8 +23,10 @@ export async function cmdAsk(question: string, flags: Record<string, string | bo
       warn("未检测到 LLM_BASE_URL/LLM_API_KEY/LLM_MODEL，使用内置模板回答器（离线模式）。配置后可获得更自然的回答。");
     }
 
+    // 阅读进度：默认用 config.userChapter；--chapter N 提供一次性临时覆盖（不写入配置）
+    const userChapter = parseChapterOverride(flags) ?? cfg.userChapter;
     // 设置 Ask 阅读进度边界：所有检索只返回 chapter <= userChapter 的数据（防剧透）
-    repo.setUserChapter(cfg.userChapter);
+    repo.setUserChapter(userChapter);
 
     const t0 = Date.now();
     let streamed = false;
@@ -37,7 +39,7 @@ export async function cmdAsk(question: string, flags: Record<string, string | bo
       const result = await askAgent(
         provider,
         repo,
-        cfg,
+        { ...cfg, userChapter },
         question,
         {
           onToken: (text) => {
@@ -74,7 +76,7 @@ export async function cmdAsk(question: string, flags: Record<string, string | bo
       // ── 传统管道（LLM 无 agent 支持 或 mock 模式） ──
       const result = await answerQuestion({
         repo,
-        cfg,
+        cfg: { ...cfg, userChapter },
         provider,
         mode,
         question,
@@ -113,6 +115,15 @@ export async function cmdAsk(question: string, flags: Record<string, string | bo
   } finally {
     repo.close();
   }
+}
+
+/** 解析 story ask --chapter N：临时覆盖本次问答的阅读进度（不持久化） */
+function parseChapterOverride(flags: Record<string, string | boolean>): number | undefined {
+  const v = flags["--chapter"];
+  if (typeof v !== "string") return undefined;
+  const n = parseInt(v, 10);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`--chapter 必须是正整数：${v}`);
+  return n;
 }
 
 function truncate(s: string, n: number): string {

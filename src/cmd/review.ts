@@ -13,7 +13,7 @@ import { log, warn, section } from "../logger.js";
 
 export async function cmdReview(flags: Record<string, string | boolean>): Promise<number> {
   const cfg = loadConfig();
-  const repo = new StoryRepo(dbPath(), cfg.maxChapter);
+  const repo = new StoryRepo(dbPath());
   const auto = flags["--auto"] === true || flags["--auto"] === "true";
   const rl = createInterface({ input, output });
 

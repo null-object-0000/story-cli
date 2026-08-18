@@ -9,8 +9,10 @@ import { log, warn, section } from "../logger.js";
 
 export async function cmdCharacter(name: string): Promise<number> {
   const cfg = loadConfig();
-  const repo = new StoryRepo(dbPath(), cfg.maxChapter);
+  const repo = new StoryRepo(dbPath());
   try {
+    // character 属于 Reader 功能：严格受 userChapter 约束（不得泄露超出阅读进度的信息）
+    repo.setUserChapter(cfg.userChapter);
     const hits = searchEntities(repo, name, 3);
     if (!hits.length) {
       warn(`未找到「${name}」（结构化库中不存在，可能是抽取缺失）`);
@@ -42,7 +44,7 @@ export async function cmdCharacter(name: string): Promise<number> {
       log("\n性格/特征：");
       for (const f of card.personalityFacts) log(`  ${f.value}（第${f.chapter}章）`);
     }
-    const anchors = topAnchors(repo.listMemoryAnchors(hit.entity.id), repo.maxChapter, 5);
+    const anchors = topAnchors(repo.listMemoryAnchors(hit.entity.id), cfg.userChapter, 5);
     if (anchors.length) {
       log("\n你可能记得ta因为：");
       for (const a of anchors) log(`  ${a.chapter}章：${a.summary}`);

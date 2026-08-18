@@ -1,6 +1,6 @@
 // 小说章节解析器
-// 识别 "第1章 xxx" / "第 405 章：xxx" / "第0008章" / "第四百零五章 xxx" 等标题，
-// 并支持按 maxChapter 物理截断（截断点之后的章节直接丢弃）。
+// 识别 "第1章 xxx" / "第 405 章：xxx" / "第0008章" / "第四百零五章 xxx" 等标题。
+// 导入整本文件识别到的所有章节（不再物理截断——防剧透边界由 userChapter 在 Reader 层控制）。
 
 export interface ParsedChapter {
   number: number;
@@ -71,27 +71,20 @@ export function detectChapterTitle(line: string): string | null {
 
 export interface ParseResult {
   chapters: ParsedChapter[];
-  /** 被截断丢弃的章节起始号（若存在超过 maxChapter 的章节） */
-  droppedFrom: number | null;
-  /** 被丢弃的章节数量 */
-  droppedCount: number;
   preambleLines: number;
   duplicates: number;
 }
 
 /**
- * 解析整本小说文本。
- * @param fullText    原文
- * @param maxChapter  只保留 1..maxChapter
+ * 解析整本小说文本，识别到的所有章节全部保留（1..N 连续导入）。
+ * 不按任何上限截断：可用章节数由导入结果自动决定（availableThrough）。
  */
-export function parseNovel(fullText: string, maxChapter: number): ParseResult {
+export function parseNovel(fullText: string): ParseResult {
   const lines = fullText.split(/\r?\n/);
   const chapters: ParsedChapter[] = [];
   let current: ParsedChapter | null = null;
   let preambleLines = 0;
   let duplicates = 0;
-  let droppedFrom: number | null = null;
-  let droppedCount = 0;
   const seen = new Set<number>();
 
   const flush = () => {
@@ -103,14 +96,6 @@ export function parseNovel(fullText: string, maxChapter: number): ParseResult {
     const line = raw.replace(/\uFEFF/g, "");
     const num = detectChapterNumber(line);
     if (num !== null && num >= 1) {
-      if (num > maxChapter) {
-        // 截断点：之后全部丢弃（包括本行之后的正文）
-        if (droppedFrom === null) droppedFrom = num;
-        droppedCount++;
-        flush();
-        current = null;
-        continue;
-      }
       if (seen.has(num)) duplicates++;
       seen.add(num);
       flush();
@@ -131,15 +116,7 @@ export function parseNovel(fullText: string, maxChapter: number): ParseResult {
   for (const c of chapters) if (!byNum.has(c.number)) byNum.set(c.number, c);
   const out = [...byNum.values()].sort((a, b) => a.number - b.number);
 
-  // 严格再校验一次：超过 maxChapter 的绝不允许进入输出
-  const kept = out.filter((c) => c.number >= 1 && c.number <= maxChapter);
-  const extra = out.length - kept.length;
-  if (extra > 0) {
-    if (droppedFrom === null) droppedFrom = kept.length ? kept[kept.length - 1].number + 1 : 1;
-    droppedCount += extra;
-  }
-
-  return { chapters: kept, droppedFrom, droppedCount, preambleLines, duplicates };
+  return { chapters: out, preambleLines, duplicates };
 }
 
 /** 解码文本：优先 UTF-8 严格解码，失败回退 GBK，再失败回退 latin1 */

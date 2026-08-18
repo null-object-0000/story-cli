@@ -11,7 +11,7 @@ export async function cmdBuild(
   positional: string[]
 ): Promise<number> {
   const cfg = loadConfig();
-  const repo = new StoryRepo(dbPath(), cfg.maxChapter);
+  const repo = new StoryRepo(dbPath());
   try {
     const providerFlag = flags["--provider"];
     if (providerFlag && providerFlag !== "openai" && providerFlag !== "mock") {
@@ -61,7 +61,6 @@ export async function cmdBuild(
       sessionLog: cfg.build?.sessionLog ?? true,
       maxBatchChapters: cfg.build?.maxBatchChapters,
       perChapterOutputTokens: cfg.build?.perChapterOutputTokens,
-      maxChapter: cfg.maxChapter,
     });
 
     section("Build 结果");

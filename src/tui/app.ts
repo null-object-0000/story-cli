@@ -109,7 +109,7 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
   // ── 顶栏：书名 · 路径（窄终端自动截断不折行）──── 全书范围 · 覆盖率 ──
 
   const modelName = (agent.state as any).model?.name ?? provider?.name ?? "unknown";
-  const cov = buildCoverage(repo, cfg);
+  const cov = buildCoverage(repo);
   // 注意：HStack 的 intrinsic 计算会用 render(safeWidth) 的 padding 结果导致虚高，
   // 所以右侧固定内容必须显式 basis = 可见宽度（否则 grow 失效、左侧被压到 minSize）
   const rightContent = ` ${dim(`已导入 ${cov.total} 章`)}  ${green(`已构建 ${cov.built}/${cov.total} (${cov.pct}%)`)} `;
@@ -366,10 +366,10 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n) + "…";
 }
 
-function buildCoverage(repo: StoryRepo, cfg: StoryConfig): { total: number; built: number; pct: number } {
+function buildCoverage(repo: StoryRepo): { total: number; built: number; pct: number } {
   try {
     const chapters = repo.countChapters();
-    const dbMax = repo.maxChapterInDb() ?? 0;
+    const dbMax = repo.availableThrough() ?? 0;
     const batches = repo.listBatches();
     const doneChapters = new Set<number>();
     for (const b of batches) {
@@ -379,10 +379,10 @@ function buildCoverage(repo: StoryRepo, cfg: StoryConfig): { total: number; buil
       for (let c = s; c <= e; c++) doneChapters.add(c);
     }
     const built = doneChapters.size;
-    const total = dbMax || chapters || cfg.maxChapter;
+    const total = dbMax || chapters;
     const pct = total > 0 ? Math.round((built / total) * 100) : 0;
     return { total, built, pct };
   } catch {
-    return { total: cfg.maxChapter, built: 0, pct: 0 };
+    return { total: 0, built: 0, pct: 0 };
   }
 }

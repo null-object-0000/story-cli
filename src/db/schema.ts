@@ -1,20 +1,20 @@
 // SQLite Schema（node:sqlite DatabaseSync）
-// 所有带 chapter 的表都内置 CHECK(chapter <= maxChapter)，从物理上保证“防剧透”。
-
-export interface SchemaOptions {
-  maxChapter: number;
-  book: string;
-}
+//
+// V0.1 收口后的新理念：Story DB 保存【完整小说】的结构化知识，
+// 不再把“小说最大章节号”编译进 Schema。带章节号的表只保证 chapter >= 1，
+// 合法章节由 chapters 表存在性 + 抽取期 Batch Range Validation 保证。
+// Reader 的无剧透边界由 StoryRepo 的 userChapter 过滤层实现（见 repo.ts），
+// 与 Schema 无关——Schema 不再承担“防剧透”职责。
 
 // prettier-ignore
-export const SCHEMA_SQL = (o: SchemaOptions) => `
+export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS chapters (
-  chapter INTEGER PRIMARY KEY CHECK (chapter >= 1 AND chapter <= ${o.maxChapter}),
+  chapter INTEGER PRIMARY KEY CHECK (chapter >= 1),
   title   TEXT NOT NULL,
   text    TEXT NOT NULL,
   chars   INTEGER NOT NULL DEFAULT 0
@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS entities (
   id               TEXT PRIMARY KEY,
   type             TEXT NOT NULL CHECK (type IN ('character','organization','location','item','concept')),
   name             TEXT NOT NULL,
-  first_seen_chapter INTEGER NOT NULL CHECK (first_seen_chapter >= 1 AND first_seen_chapter <= ${o.maxChapter}),
-  last_seen_chapter  INTEGER CHECK (last_seen_chapter IS NULL OR (last_seen_chapter >= 1 AND last_seen_chapter <= ${o.maxChapter})),
+  first_seen_chapter INTEGER NOT NULL CHECK (first_seen_chapter >= 1),
+  last_seen_chapter  INTEGER CHECK (last_seen_chapter IS NULL OR (last_seen_chapter >= 1)),
   description      TEXT,
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS aliases (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   alias       TEXT NOT NULL,
-  from_chapter INTEGER NOT NULL CHECK (from_chapter >= 1 AND from_chapter <= ${o.maxChapter}),
+  from_chapter INTEGER NOT NULL CHECK (from_chapter >= 1),
   note        TEXT,
   UNIQUE(entity_id, alias)
 );
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS facts (
   entity_id  TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   type       TEXT NOT NULL,
   value      TEXT NOT NULL,
-  chapter    INTEGER NOT NULL CHECK (chapter >= 1 AND chapter <= ${o.maxChapter}),
+  chapter    INTEGER NOT NULL CHECK (chapter >= 1),
   confidence REAL NOT NULL DEFAULT 0.8,
   status     TEXT NOT NULL DEFAULT 'active',
   UNIQUE(entity_id, type, value, chapter)
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS relations (
   to_entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   type          TEXT NOT NULL,
   detail        TEXT,
-  chapter       INTEGER NOT NULL CHECK (chapter >= 1 AND chapter <= ${o.maxChapter}),
+  chapter       INTEGER NOT NULL CHECK (chapter >= 1),
   confidence    REAL NOT NULL DEFAULT 0.8,
   status        TEXT NOT NULL DEFAULT 'active',
   CHECK (from_entity_id <> to_entity_id),
@@ -76,9 +76,9 @@ CREATE TABLE IF NOT EXISTS abilities (
   path            TEXT,
   level           TEXT,
   source_entity   TEXT,
-  acquired_chapter INTEGER CHECK (acquired_chapter IS NULL OR (acquired_chapter >= 1 AND acquired_chapter <= ${o.maxChapter})),
+  acquired_chapter INTEGER CHECK (acquired_chapter IS NULL OR acquired_chapter >= 1),
   summary         TEXT,
-  chapter         INTEGER NOT NULL CHECK (chapter >= 1 AND chapter <= ${o.maxChapter}),
+  chapter         INTEGER NOT NULL CHECK (chapter >= 1),
   confidence      REAL NOT NULL DEFAULT 0.8,
   UNIQUE(entity_id, name)
 );
@@ -86,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_abilities_name ON abilities(name);
 
 CREATE TABLE IF NOT EXISTS events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  chapter     INTEGER NOT NULL CHECK (chapter >= 1 AND chapter <= ${o.maxChapter}),
+  chapter     INTEGER NOT NULL CHECK (chapter >= 1),
   participants TEXT NOT NULL DEFAULT '[]',
   type        TEXT NOT NULL,
   summary     TEXT NOT NULL,
@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_events_chapter ON events(chapter);
 CREATE TABLE IF NOT EXISTS memory_anchors (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,
   entity_id             TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-  chapter               INTEGER NOT NULL CHECK (chapter >= 1 AND chapter <= ${o.maxChapter}),
+  chapter               INTEGER NOT NULL CHECK (chapter >= 1),
   summary               TEXT NOT NULL,
   importance            REAL NOT NULL DEFAULT 0.5,
   memorability          REAL NOT NULL DEFAULT 0.7,
@@ -110,7 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_anchors_entity ON memory_anchors(entity_id);
 
 CREATE TABLE IF NOT EXISTS entity_appearances (
   entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-  chapter   INTEGER NOT NULL CHECK (chapter >= 1 AND chapter <= ${o.maxChapter}),
+  chapter   INTEGER NOT NULL CHECK (chapter >= 1),
   mentions  INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (entity_id, chapter)
 );
@@ -180,19 +180,5 @@ CREATE TABLE IF NOT EXISTS review_log (
 );
 `;
 
-/** 数据库完整性自检：确认 maxChapter 与配置一致 */
-export function verifySchemaMax(db: { prepare(sql: string): { get(...args: unknown[]): unknown } }, maxChapter: number): void {
-  const sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='facts'";
-  const row = db.prepare(sql).get() as { sql?: string } | undefined;
-  if (row && row.sql && !row.sql.includes(`chapter >= 1 AND chapter <= ${maxChapter}`)) {
-    throw new Error(
-      `story.db 的 schema 上限 (${extractMax(row.sql)}) 与配置 maxChapter (${maxChapter}) 不一致。\n` +
-        `请重新运行 story init（或删除 .story/story.db 后重新 init + import + build）。`
-    );
-  }
-}
-
-function extractMax(sql: string): number {
-  const m = /chapter <= (\d+)/.exec(sql);
-  return m ? parseInt(m[1], 10) : -1;
-}
+/** Schema 模型版本：1 = 旧模型（maxChapter 编译进 CHECK），2 = 新模型（userChapter 可见性） */
+export const SCHEMA_VERSION = "2";

@@ -2,7 +2,7 @@
 //   问题 → Intent → 实体解析 → 结构化上下文（只读结构化库）→ LLM / 模板回答器
 // 约束：
 //   - 绝不读取 chapters 表原文；
-//   - 上下文中的任意记录 chapter <= maxChapter（DB CHECK + 构造保证）；
+//   - 上下文中的任意记录 chapter <= userChapter（StoryRepo 可见性过滤 + 构造保证）；
 //   - 数据不足时明确回答"当前结构化数据不足以可靠回答"，绝不编造。
 // 增强：
 //   - LLM 模式下，当启发式搜索无命中或分数过低时，给 LLM 一个结构化实体索引做实体消歧（spec §21）。
@@ -72,7 +72,6 @@ export async function answerQuestion(opts: {
   onReady?: (info: { intent: string; entities: string[] }) => void;
 }): Promise<AskResult> {
   const { repo, cfg, provider, mode, question, onToken, onReady } = opts;
-  const maxChapter = cfg.maxChapter;
   const userChapter = cfg.userChapter;
 
   // 1. 能力名命中（优先于一般实体解析）
@@ -125,7 +124,7 @@ export async function answerQuestion(opts: {
   // 5. 构造结构化上下文
   const ctx: StructuredContext = buildContext(
     repo,
-    { book: cfg.book, maxChapter, userChapter },
+    { book: cfg.book, userChapter },
     question,
     intent,
     hits,
@@ -202,7 +201,7 @@ async function llmFallbackAnswer(
   return res.content.trim();
 }
 
-export function buildEntityIndexDigest(repo: StoryRepo, maxChapter: number, maxN = 30): string {
+export function buildEntityIndexDigest(repo: StoryRepo, _userChapter: number, maxN = 30): string {
   const entities = repo
     .listEntities()
     .sort((a, b) => {

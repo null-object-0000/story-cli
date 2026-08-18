@@ -49,14 +49,16 @@ export async function agentExtract(
   const onActivity = callbacks?.onActivity;
   const sessionLog = callbacks?.sessionLog;
 
-  const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT.replaceAll("__MAX_CHAPTER__", String(input.maxChapter))}
+  const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT.replaceAll("__START_CHAPTER__", String(input.startChapter)).replaceAll("__END_CHAPTER__", String(input.endChapter))}
 
 ## Agent 工作流程（必须遵守）
-1. 通读「待抽取章节」。
+1. 通读「待抽取章节」（第 ${input.startChapter}~${input.endChapter} 章）。
 2. 若文中出现的人物/组织可能【已在知识库中】存在（主角、常驻配角、已有组织等旧实体），
-   调用工具 search_existing_entities 批量检索，用返回的 entityId 在输出中引用，禁止重复创建。
-3. 未命中检索的旧名字、以及真正第一次登场的新名字，一律作为新实体处理（newEntities 用 name 给出）。
-4. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，不要输出其他任何文字。`;
+   调用工具 search_existing_entities 批量检索。工具返回结果的 name 是 canonical name（正式名）。
+3. 【实体引用契约】命中已有实体后，最终 JSON 必须使用工具返回的 canonical name 作为 entityName/fromName/toName，
+   不要使用当前文本中的别名再次创建实体（工具已通过别名定位到该实体）。
+4. 未命中检索的旧名字、以及真正第一次登场的新名字，一律作为新实体处理（newEntities 用 name 给出）。
+5. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，不要输出其他任何文字。`;
 
   // 章节文本（与 Ask 不同：build 阶段可读取原文）
   const chapters = input.texts
@@ -81,7 +83,7 @@ ${chapters}
           name: "search_existing_entities",
           label: "检索已有实体",
           description:
-            "批量检索知识库中已存在的实体。传入章节文本中出现的、你可能想复用的名字（正式名/别名/固定称呼），返回命中实体的 id/name/type 及别名。返回结果中出现的 entityId 必须在最终 JSON 中复用，避免重复创建实体。",
+            "批量检索知识库中已存在的实体。传入章节文本中出现的、你可能想复用的名字（正式名/别名/固定称呼），返回命中实体的 id/name/type 及别名。返回结果中的 name 是 canonical name（正式名）：最终 JSON 必须使用该 canonical name 作为 entityName/fromName/toName，避免用别名创建重复实体。",
           parameters: Type.Object({
             names: Type.Array(Type.String({ description: "待检索的名字列表（最多 40 个）" }), {
               maxItems: MAX_QUERY_NAMES,
@@ -211,7 +213,6 @@ ${chapters}
     startChapter: input.startChapter, endChapter: input.endChapter,
     chapterCount: input.texts.length,
     chars: input.texts.reduce((s, x) => s + x.text.length, 0),
-    maxChapter: input.maxChapter,
   });
   sessionLog?.write({ t: "prompt", range: input.range, system: systemPrompt, user: userMessage });
 

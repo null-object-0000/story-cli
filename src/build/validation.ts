@@ -1,4 +1,12 @@
 // 抽取输出的 runtime schema 校验。校验失败 → 重试；重试仍失败 → 整批跳过并记日志（绝不脏数据入库）。
+//
+// V0.1 收口：校验范围从“1..maxChapter”改为【当前 Batch 范围】startChapter..endChapter。
+// Extraction Agent 只阅读 startChapter~endChapter 的章节，因此本批新抽取数据只允许产生
+// 该范围内的 Facts/Relations/Abilities/Events/MemoryAnchors/Aliases/首次登场。
+// 即使某章节号确实存在于整本书中（比如第 800 章存在），只要它不属于本批范围，就属于幻觉/数据错误。
+//
+// 例外：能力的 acquiredChapter（获得章节）是“故事内获得时间”的元信息，允许引用本批之前的过去
+// （如本章揭露“此能力是 100 章获得的”），但不能指向本批之后（<= endChapter）。
 
 import { ENTITY_TYPES } from "../db/repo.js";
 
@@ -38,10 +46,18 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
 
-function checkChapter(v: unknown, maxChapter: number, label: string): number {
+function checkChapterInRange(v: unknown, startChapter: number, endChapter: number, label: string): number {
   const n = num(v);
-  if (n === null || !Number.isInteger(n) || n < 1 || n > maxChapter) {
-    throw new ValidationError(`${label} 章节号非法：${JSON.stringify(v)}（必须在 1..${maxChapter}）`);
+  if (n === null || !Number.isInteger(n) || n < startChapter || n > endChapter) {
+    throw new ValidationError(`${label} 章节号非法：${JSON.stringify(v)}（本批范围 ${startChapter}..${endChapter}）`);
+  }
+  return n;
+}
+
+function checkPastChapter(v: unknown, endChapter: number, label: string): number {
+  const n = num(v);
+  if (n === null || !Number.isInteger(n) || n < 1 || n > endChapter) {
+    throw new ValidationError(`${label} 章节号非法：${JSON.stringify(v)}（必须 >= 1 且 <= 本批末章 ${endChapter}）`);
   }
   return n;
 }
@@ -54,7 +70,7 @@ function checkConfidence(v: unknown, label: string): number {
   return n;
 }
 
-export function validateExtractionOutput(raw: unknown, maxChapter: number): ExtractionBundle {
+export function validateExtractionOutput(raw: unknown, startChapter: number, endChapter: number): ExtractionBundle {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new ValidationError("输出必须是 JSON 对象");
   }
@@ -70,7 +86,7 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
     const type = str((e as any).type);
     if (!name) throw new ValidationError("newEntities.name 缺失");
     if (!type || !ENTITY_TYPES.includes(type as any)) throw new ValidationError(`newEntities.type 非法：${type}`);
-    const chapter = checkChapter((e as any).firstSeenChapter, maxChapter, `实体 ${name}`);
+    const chapter = checkChapterInRange((e as any).firstSeenChapter, startChapter, endChapter, `实体 ${name}`);
     newNames.add(name);
     newEntities.push({ name, type, firstSeenChapter: chapter });
   }
@@ -82,7 +98,7 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
     const alias = str((a as any).alias);
     if (!entityName) throw new ValidationError("aliases.entityName 缺失");
     if (!alias) throw new ValidationError("aliases.alias 缺失");
-    const chapter = checkChapter((a as any).fromChapter, maxChapter, `别名 ${alias}`);
+    const chapter = checkChapterInRange((a as any).fromChapter, startChapter, endChapter, `别名 ${alias}`);
     aliases.push({ entityName, alias, fromChapter: chapter });
   }
 
@@ -95,7 +111,7 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
     if (!entityName) throw new ValidationError("facts.entityName 缺失");
     if (!type) throw new ValidationError("facts.type 缺失");
     if (!value) throw new ValidationError("facts.value 缺失");
-    const chapter = checkChapter((f as any).chapter, maxChapter, `事实 ${value.slice(0, 20)}`);
+    const chapter = checkChapterInRange((f as any).chapter, startChapter, endChapter, `事实 ${value.slice(0, 20)}`);
     const confidence = checkConfidence((f as any).confidence ?? 0.8, `事实 ${value.slice(0, 20)}`);
     facts.push({ entityName, type, value, chapter, confidence });
     if (value.length > 500) throw new ValidationError(`事实描述过长：${value.slice(0, 30)}...`);
@@ -110,7 +126,7 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
     if (!fromName || !toName) throw new ValidationError("relations fromName/toName 缺失");
     if (!type) throw new ValidationError("relations.type 缺失");
     if (fromName === toName) throw new ValidationError(`关系两端不能相同：${fromName}`);
-    const chapter = checkChapter((r as any).chapter, maxChapter, `关系 ${fromName}-${toName}`);
+    const chapter = checkChapterInRange((r as any).chapter, startChapter, endChapter, `关系 ${fromName}-${toName}`);
     const confidence = checkConfidence((r as any).confidence ?? 0.8, `关系 ${fromName}-${toName}`);
     relations.push({ fromName, toName, type, detail: str((r as any).detail), chapter, confidence });
   }
@@ -122,10 +138,10 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
     const name = str((ab as any).name);
     if (!entityName) throw new ValidationError("abilities.entityName 缺失");
     if (!name) throw new ValidationError("abilities.name 缺失");
-    const chapter = checkChapter((ab as any).chapter, maxChapter, `能力 ${name}`);
+    const chapter = checkChapterInRange((ab as any).chapter, startChapter, endChapter, `能力 ${name}`);
     let acquired: number | null = null;
     const ac = (ab as any).acquiredChapter;
-    if (ac !== null && ac !== undefined && ac !== "") acquired = checkChapter(ac, maxChapter, `能力 ${name} 获得章节`);
+    if (ac !== null && ac !== undefined && ac !== "") acquired = checkPastChapter(ac, endChapter, `能力 ${name} 获得章节`);
     abilities.push({
       entityName, name,
       category: str((ab as any).category),
@@ -142,7 +158,7 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
   const events: ExtractionBundle["events"] = [];
   for (const e of arr("events")) {
     if (typeof e !== "object" || e === null) throw new ValidationError("events 元素必须是对象");
-    const chapter = checkChapter((e as any).chapter, maxChapter, `事件`);
+    const chapter = checkChapterInRange((e as any).chapter, startChapter, endChapter, `事件`);
     const summary = str((e as any).summary);
     if (!summary) throw new ValidationError("events.summary 缺失");
     const ps = (e as any).participantNames;
@@ -159,7 +175,7 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
     const summary = str((m as any).summary);
     if (!entityName) throw new ValidationError("memoryAnchors.entityName 缺失");
     if (!summary) throw new ValidationError("memoryAnchors.summary 缺失");
-    const chapter = checkChapter((m as any).chapter, maxChapter, `记忆锚点 ${summary.slice(0, 16)}`);
+    const chapter = checkChapterInRange((m as any).chapter, startChapter, endChapter, `记忆锚点 ${summary.slice(0, 16)}`);
     const imp = num((m as any).importance) ?? 0.5;
     const mem = num((m as any).memorability) ?? 0.7;
     const pr = num((m as any).protagonistRelevance) ?? 0.5;
@@ -193,8 +209,8 @@ export function validateExtractionOutput(raw: unknown, maxChapter: number): Extr
       kind,
       entityName: str((c as any).entityName),
       detail,
-      chapterA: a !== null && a >= 1 && a <= maxChapter ? a : null,
-      chapterB: b !== null && b >= 1 && b <= maxChapter ? b : null,
+      chapterA: a !== null && a >= startChapter && a <= endChapter ? a : null,
+      chapterB: b !== null && b >= startChapter && b <= endChapter ? b : null,
     });
   }
 

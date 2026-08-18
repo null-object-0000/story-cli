@@ -1,8 +1,17 @@
 // 数据访问层：对 SQLite 的封装。Ask 阶段只允许通过本层访问【结构化表】，
 // 绝不暴露 chapters 表读取（chapters 原始文本仅供 Build 使用）。
+//
+// V0.1 收口后的可见性模型：
+//   - Story DB 保存【完整小说】的结构化知识（availableThrough = MAX(chapters.chapter)）；
+//   - StoryRepo 默认处于 Build 模式（userChapterBound = null）：所有读方法不设过滤，能看到全部数据；
+//   - Reader 路径（Ask / Agent / TUI / character）调用 setUserChapter() 后：
+//     所有读方法（含 getEntity / findEntityByName / findByAlias 等）只返回
+//     chapter / first_seen_chapter / from_chapter <= userChapter 的数据。
+//   防剧透边界是第一道可靠的数据访问层防线，不依赖 Prompt 或每个 Tool 自觉过滤。
 
 import { DatabaseSync } from "node:sqlite";
-import { SCHEMA_SQL, verifySchemaMax } from "./schema.js";
+import { rmSync } from "node:fs";
+import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.js";
 import { entityId } from "../util.js";
 
 export type EntityType = "character" | "organization" | "location" | "item" | "concept";
@@ -115,20 +124,25 @@ function rows<T>(r: unknown[]): Rows<T> {
 
 export class StoryRepo {
   readonly db: DatabaseSync;
-  readonly maxChapter: number;
-  /** 用户当前阅读进度边界（Ask 过滤用）。默认 = maxChapter（全量）。
-   *  Ask/Agent 路径通过 setUserChapter() 收窄，使所有读方法只返回 chapter <= userChapter 的数据。 */
-  private userChapterBound: number;
+  /** 用户当前阅读进度边界（Reader 过滤用）。null = Build 模式：不做任何过滤（可看全部）。
+   *  Ask/Agent/TUI/character 等 Reader 路径通过 setUserChapter() 收窄。 */
+  private userChapterBound: number | null = null;
 
-  constructor(dbPath: string, maxChapter: number) {
+  constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
+    // 一次性迁移：旧模型把 maxChapter 编译进 SQLite CHECK，无法容纳“整本导入”。
+    // 检测到旧 schema 直接重建（这是模型迁移，不是“章节最大值变化”导致的正常重建）。
+    if (hasLegacyMaxChapterCheck(this.db)) {
+      this.db.close();
+      rmSync(dbPath, { force: true });
+      for (const s of ["-wal", "-shm"]) rmSync(dbPath + s, { force: true });
+      this.db = new DatabaseSync(dbPath);
+    }
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
-    this.maxChapter = maxChapter;
-    this.userChapterBound = maxChapter;
-    this.db.exec(SCHEMA_SQL({ maxChapter, book: "" }));
-    verifySchemaMax(this.db, maxChapter);
+    this.db.exec(SCHEMA_SQL);
     this.ensureLlmLogColumns();
+    this.db.prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("schema_version", SCHEMA_VERSION);
   }
 
   /** 旧库迁移：llm_logs 新增列（chars/chapters/input_uncached_tokens） */
@@ -146,19 +160,37 @@ export class StoryRepo {
     }
   }
 
-  /** 设置 Ask 阅读进度边界（1..maxChapter）。之后所有读方法只返回 chapter <= userChapter 的数据。 */
+  /** 当前已导入的最大章节号（chapters 表自动决定），即 availableThrough；无章节时返回 null */
+  availableThrough(): number | null {
+    const r = this.db.prepare("SELECT MAX(chapter) AS m FROM chapters").get() as { m: number | null };
+    return r.m;
+  }
+  /** 当前结构化知识已构建到的章节（batch_state 中 done 批次的最大 end_chapter），即 builtThrough；无则返回 null */
+  builtThrough(): number | null {
+    const r = this.db.prepare("SELECT MAX(end_chapter) AS m FROM batch_state WHERE status='done'").get() as { m: number | null };
+    return r.m;
+  }
+  /** Reader 实际可用范围 = min(userChapter, builtThrough)；builtThrough 未知时按 userChapter 计 */
+  effectiveThrough(): number {
+    const uc = this.userChapter;
+    const bt = this.builtThrough();
+    return bt === null || bt > uc ? uc : bt;
+  }
+
+  /** 设置 Reader 阅读进度边界（>=1）。之后所有读方法只返回 chapter <= userChapter 的数据。
+   *  Build 阶段不要调用本方法（保持 null = 全量可见）。 */
   setUserChapter(n: number): void {
-    if (!Number.isInteger(n) || n < 1 || n > this.maxChapter) {
-      throw new Error(`userChapter ${n} 非法（必须在 1..${this.maxChapter}）`);
+    if (!Number.isInteger(n) || n < 1) {
+      throw new Error(`userChapter ${n} 非法（必须为 >= 1 的整数）`);
     }
     this.userChapterBound = n;
   }
   get userChapter(): number {
-    return this.userChapterBound;
+    return this.userChapterBound ?? this.availableThrough() ?? 0;
   }
-  /** chapter 过滤子句；若边界未收窄（=maxChapter）返回空串（保持 SQL 简单） */
+  /** chapter 过滤子句；Build 模式（bound=null）返回空串（不设过滤） */
   private chFilter(col: string): string {
-    return this.userChapterBound < this.maxChapter ? ` AND ${col} <= ${this.userChapterBound}` : "";
+    return this.userChapterBound !== null ? ` AND ${col} <= ${this.userChapterBound}` : "";
   }
 
   // ---------- meta ----------
@@ -181,8 +213,8 @@ export class StoryRepo {
     try {
       del.run();
       for (const c of chapters) {
-        if (c.number < 1 || c.number > this.maxChapter) {
-          throw new Error(`非法章节号 ${c.number}（maxChapter=${this.maxChapter}），拒绝入库`);
+        if (c.number < 1) {
+          throw new Error(`非法章节号 ${c.number}（章节号必须 >= 1），拒绝入库`);
         }
         ins.run(c.number, c.title, c.text, Buffer.byteLength(c.text, "utf-8"));
       }
@@ -203,26 +235,25 @@ export class StoryRepo {
     const r = this.db.prepare("SELECT text FROM chapters WHERE chapter=?").get(number) as { text: string } | undefined;
     return r ? r.text : null;
   }
-  maxChapterInDb(): number | null {
-    const r = this.db.prepare("SELECT MAX(chapter) AS m FROM chapters").get() as { m: number | null };
-    return r.m;
-  }
 
   // ---------- entities ----------
+  /** Build 内部：按 (type, name) 精确查找（不设 Reader 过滤；仅供 Build/消歧使用） */
   findEntityByTypeName(type: EntityType, name: string): EntityRow | null {
     const r = this.db.prepare("SELECT * FROM entities WHERE type=? AND name=?").get(type, name) as EntityRow | undefined;
     return r ?? null;
   }
+  /** Reader 可见的实体查询：只返回 first_seen_chapter <= userChapter 的实体。
+   *  “未来人物的存在本身”也是剧透，因此超出 userChapter 的实体必须表现为“不存在”。 */
   getEntity(id: string): EntityRow | null {
-    const r = this.db.prepare("SELECT * FROM entities WHERE id=?").get(id) as EntityRow | undefined;
+    const r = this.db.prepare(`SELECT * FROM entities WHERE id=?${this.chFilter("first_seen_chapter")}`).get(id) as EntityRow | undefined;
     return r ?? null;
   }
-  /** 通过 id 或精确名称解析实体 */
+  /** 通过 id 或精确名称解析实体（Reader 可见性过滤与 getEntity/findEntityByName 一致） */
   resolveEntity(ref: string): EntityRow | null {
     return this.getEntity(ref) ?? this.findEntityByName(ref);
   }
   findEntityByName(name: string): EntityRow | null {
-    const r = this.db.prepare("SELECT * FROM entities WHERE name=?").get(name) as EntityRow | undefined;
+    const r = this.db.prepare(`SELECT * FROM entities WHERE name=?${this.chFilter("first_seen_chapter")}`).get(name) as EntityRow | undefined;
     return r ?? null;
   }
   listEntities(type?: EntityType): EntityRow[] {
@@ -231,8 +262,8 @@ export class StoryRepo {
     return rows<EntityRow>(this.db.prepare(`SELECT * FROM entities WHERE 1=1${f} ORDER BY first_seen_chapter`).all());
   }
   upsertEntity(type: EntityType, name: string, chapter: number): { id: string; created: boolean } {
-    if (chapter < 1 || chapter > this.maxChapter) {
-      throw new Error(`实体 ${name} 的章节 ${chapter} 超出 maxChapter=${this.maxChapter}`);
+    if (!Number.isInteger(chapter) || chapter < 1) {
+      throw new Error(`实体 ${name} 的章节 ${chapter} 非法（必须 >= 1）`);
     }
     const existing = this.findEntityByTypeName(type, name);
     if (existing) {
@@ -244,9 +275,16 @@ export class StoryRepo {
       return { id: existing.id, created: false };
     }
     const id = entityId(type, name);
+    // 先插入实体（possible_duplicates 有外键约束，冲突记录须在实体存在后写入）
     this.db
       .prepare("INSERT INTO entities(id,type,name,first_seen_chapter,last_seen_chapter) VALUES(?,?,?,?,?)")
       .run(id, type, name, chapter, chapter);
+    // same-name-different-type 冲突检测：同名实体已存在但类型不同（如 concept_梅花K vs character_梅花K）
+    const otherType = this.db.prepare("SELECT * FROM entities WHERE name=? AND type<>?").get(name, type) as EntityRow | undefined;
+    if (otherType) {
+      const [low, high] = [id, otherType.id].sort();
+      this.addPossibleDuplicate(low, high, `type_conflict：同名不同实体类型「${name}」（${type} vs ${otherType.type}）`);
+    }
     return { id, created: true };
   }
   renameEntity(id: string, newName: string): void {
@@ -263,10 +301,14 @@ export class StoryRepo {
     const r = this.db.prepare("INSERT OR IGNORE INTO aliases(entity_id,alias,from_chapter,note) VALUES(?,?,?,?)").run(entityIdRef, alias, chapter, note ?? null);
     return r.changes > 0 ? "added" : "exists";
   }
+  /** Reader 可见的别名解析：alias.from_chapter 与 entity.first_seen_chapter 都必须 <= userChapter。
+   *  未来别名（第600章才知道的外号）在 userChapter=405 时必须解析不到。 */
   findByAlias(alias: string): EntityRow | null {
-    const r = this.db
-      .prepare("SELECT e.* FROM aliases a JOIN entities e ON e.id=a.entity_id WHERE a.alias=?")
-      .get(alias) as EntityRow | undefined;
+    let sql = `SELECT e.* FROM aliases a JOIN entities e ON e.id=a.entity_id WHERE a.alias=?`;
+    if (this.userChapterBound !== null) {
+      sql += ` AND a.from_chapter <= ${this.userChapterBound} AND e.first_seen_chapter <= ${this.userChapterBound}`;
+    }
+    const r = this.db.prepare(sql).get(alias) as EntityRow | undefined;
     return r ?? null;
   }
   listAliases(entityIdRef?: string): AliasRow[] {
@@ -374,7 +416,8 @@ export class StoryRepo {
     return true;
   }
   listAbilities(entityIdRef?: string): AbilityRow[] {
-    const f = this.chFilter("COALESCE(acquired_chapter,chapter)");
+    // Reader 可见性以 chapter（“读者在第几章得知此能力”）为边界，而不是 acquired_chapter（故事内获得时间）。
+    const f = this.chFilter("chapter");
     if (entityIdRef) {
       return rows<AbilityRow>(
         this.db.prepare(`SELECT * FROM abilities WHERE entity_id=?${f} ORDER BY COALESCE(acquired_chapter,chapter)`).all(entityIdRef)
@@ -383,7 +426,7 @@ export class StoryRepo {
     return rows<AbilityRow>(this.db.prepare(`SELECT * FROM abilities WHERE 1=1${f} ORDER BY id`).all());
   }
   findAbilityByName(name: string): AbilityRow[] {
-    return rows<AbilityRow>(this.db.prepare(`SELECT * FROM abilities WHERE name=?${this.chFilter("COALESCE(acquired_chapter,chapter)")}`).all(name));
+    return rows<AbilityRow>(this.db.prepare(`SELECT * FROM abilities WHERE name=?${this.chFilter("chapter")}`).all(name));
   }
 
   // ---------- events ----------
@@ -746,8 +789,8 @@ export class StoryRepo {
   }
 
   private assertChapter(chapter: number): void {
-    if (!Number.isInteger(chapter) || chapter < 1 || chapter > this.maxChapter) {
-      throw new Error(`章节号 ${chapter} 非法（必须在 1..${this.maxChapter}），拒绝写入结构化数据`);
+    if (!Number.isInteger(chapter) || chapter < 1) {
+      throw new Error(`章节号 ${chapter} 非法（必须 >= 1），拒绝写入结构化数据`);
     }
   }
 
@@ -757,5 +800,17 @@ export class StoryRepo {
     } catch {
       /* noop */
     }
+  }
+}
+
+/** 检测旧模型 schema：带章节号的表是否仍把“chapter <= N”编译进 CHECK（N 为旧 maxChapter）。
+ *  旧库无法容纳“整本导入”，检测到即触发一次性重建（模型迁移）。 */
+function hasLegacyMaxChapterCheck(db: DatabaseSync): boolean {
+  try {
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='facts'").get() as { sql?: string } | undefined;
+    if (!row?.sql) return false;
+    return /chapter\s*<=\s*\d+/.test(row.sql);
+  } catch {
+    return false;
   }
 }

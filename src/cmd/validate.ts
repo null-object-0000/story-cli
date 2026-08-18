@@ -6,38 +6,22 @@ import { log, warn, section } from "../logger.js";
 
 export async function cmdValidate(): Promise<number> {
   const cfg = loadConfig();
-  const repo = new StoryRepo(dbPath(), cfg.maxChapter);
+  const repo = new StoryRepo(dbPath());
   const errors: string[] = [];
   const warnings: string[] = [];
   let chapters = 0;
+  let availableThrough: number | null = null;
+  let builtThrough: number | null = null;
 
   try {
     // 0. 章节库
     chapters = repo.countChapters();
     if (chapters === 0) errors.push("chapters 表为空：请先 story import");
-    const dbMax = repo.maxChapterInDb();
-    if (dbMax !== null && dbMax > cfg.maxChapter) errors.push(`chapters 最大章节 ${dbMax} > maxChapter ${cfg.maxChapter}`);
+    availableThrough = repo.availableThrough();
+    builtThrough = repo.builtThrough();
 
-    // 1. 章节越界（严重）—— DB CHECK 下理论上不可能，但防一手
-    const overMax = (table: string, col: string) =>
-      (repo.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} IS NOT NULL AND ${col} > ?`).get(cfg.maxChapter) as { n: number }).n;
-
-    const checks: [string, string][] = [
-      ["entities", "first_seen_chapter"],
-      ["entities", "last_seen_chapter"],
-      ["aliases", "from_chapter"],
-      ["facts", "chapter"],
-      ["relations", "chapter"],
-      ["abilities", "chapter"],
-      ["abilities", "acquired_chapter"],
-      ["events", "chapter"],
-      ["memory_anchors", "chapter"],
-      ["entity_appearances", "chapter"],
-    ];
-    for (const [t, c] of checks) {
-      const n = overMax(t, c);
-      if (n > 0) errors.push(`${t}.${c} 有 ${n} 条记录超过 maxChapter=${cfg.maxChapter}（严重：防剧透违规）`);
-    }
+    // 1. 结构性完整性检查（章节越界不再适用：完整 DB 本来就包含所有章节；
+    //    Reader 防剧透由 userChapter 层保证，见 story audit）
 
     // 2. 孤儿别名
     const orphanAliases = (repo.db.prepare(
@@ -105,8 +89,10 @@ export async function cmdValidate(): Promise<number> {
   }
 
   section("Validate 结果");
-  log(`maxChapter = ${cfg.maxChapter}`);
-  log(`chapters   = ${chapters}`);
+  log(`availableThrough = ${availableThrough ?? 0}（由 chapters 数据自动决定）`);
+  log(`builtThrough     = ${builtThrough ?? 0}`);
+  log(`userChapter      = ${cfg.userChapter}`);
+  log(`chapters         = ${chapters}`);
   if (errors.length) {
     for (const e of errors) log(`  [ERROR] ${e}`);
   }

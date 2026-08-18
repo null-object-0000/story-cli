@@ -3,7 +3,6 @@ import { join } from "node:path";
 
 export interface StoryConfig {
   book: string;
-  maxChapter: number;      // schema/结构化上限（全量章节数）
   userChapter: number;     // 用户当前阅读进度（Ask 过滤边界，默认第 1 章）
   llm?: {
     // 连接（优先环境变量 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL）
@@ -61,7 +60,6 @@ export function costEstimate(inputTokens: number, uncachedInputTokens: number, o
 
 export const DEFAULT_CONFIG: StoryConfig = {
   book: "我不是戏神",
-  maxChapter: 405,
   userChapter: 1,
   build: { batchSize: 1, retries: 2, autoBatch: false, perChapterOutputTokens: 260, maxBatchChapters: 60 },
 };
@@ -100,11 +98,10 @@ export function saveConfig(cfg: StoryConfig, cwd = process.cwd()): void {
   writeFileSync(configPath(cwd), JSON.stringify(cfg, null, 2), "utf-8");
 }
 
-export function initProject(opts: { book?: string; maxChapter?: number; userChapter?: number } = {}, cwd = process.cwd()): StoryConfig {
+export function initProject(opts: { book?: string; userChapter?: number } = {}, cwd = process.cwd()): StoryConfig {
   ensureProjectDir(cwd);
   const cfg: StoryConfig = {
     book: opts.book || DEFAULT_CONFIG.book,
-    maxChapter: opts.maxChapter ?? DEFAULT_CONFIG.maxChapter,
     userChapter: opts.userChapter ?? DEFAULT_CONFIG.userChapter,
     build: {
       batchSize: DEFAULT_CONFIG.build?.batchSize ?? 1,
