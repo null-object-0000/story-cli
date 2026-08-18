@@ -86,11 +86,13 @@ export function logAskEvent(logger: AskSessionLogger, event: unknown): void {
     logger.log({ kind: "tool_call", tool: e.toolName, args: e.args });
   } else if (e.type === "tool_execution_end") {
     const isError = e.isError;
-    const firstText = ((e.result?.content?.[0] as any)?.text ?? "").slice(0, 200);
+    // 注意：tool_execution_end 事件没有 error 字段——错误信息在 result.content[0].text 里
+    // （pi-agent-core 的 createErrorToolResult 把 message 放进文本块）
+    const firstText = ((e.result?.content?.[0] as any)?.text ?? "").slice(0, 300);
     logger.log({
       kind: "tool_result",
       tool: e.toolName,
-      error: isError ? (e.error?.message ?? String(e.error) ?? "执行失败") : undefined,
+      error: isError ? (firstText || "执行失败") : undefined,
       detail: isError ? undefined : (firstText || "(空结果)"),
     });
   }

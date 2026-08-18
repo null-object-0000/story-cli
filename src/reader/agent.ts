@@ -13,9 +13,6 @@ import { buildNovelTools, NovelToolContext } from "./tools.js";
 import { AskSessionLogger, logAskEvent } from "./ask-log.js";
 import { log } from "../logger.js";
 
-/** Agent 最大工具调用轮数（防止模型无限循环调用工具） */
-const MAX_TOOL_TURNS = 8;
-
 export interface AskAgentResult {
   answer: string;
   tokens: { input: number; output: number };
@@ -61,8 +58,6 @@ export async function askAgent(
     focus: { from: null, to: null },
   };
 
-  const toolCallCounter = { count: 0 };
-
   const agent = new Agent({
     initialState: {
       systemPrompt: buildAgentSystemPrompt(cfg),
@@ -71,17 +66,6 @@ export async function askAgent(
     },
     streamFn: streamFn as any,
     toolExecution: "sequential",
-    beforeToolCall: async ({ toolCall }) => {
-      toolCallCounter.count++;
-      if (toolCallCounter.count > MAX_TOOL_TURNS) {
-        return {
-          block: true,
-          reason: `已达到最大工具调用次数（${MAX_TOOL_TURNS}）。请停止调用工具，直接根据已获取的数据回答。若数据不足，请明确回答「当前结构化数据不足以可靠回答这个问题。」`,
-          terminate: true,
-        };
-      }
-      return undefined;
-    },
   });
 
   // 订阅事件
@@ -153,7 +137,7 @@ export async function askAgent(
     await agent.prompt(question);
     // 空回答二次机会：模型可能检索到数据后忘了总结（或工具调用失败后直接返回空）——
     // 追加一条明确指令，要求它基于已检索数据回答或明确说数据不足（禁止再调工具、禁止空内容）
-    if (!finalAnswer && !lastAssistantText && toolCallCounter.count > 0) {
+    if (!finalAnswer && !lastAssistantText && toolCalls > 0) {
       await agent.prompt(
         "请直接根据你刚才通过工具检索到的数据回答我上一个问题。能回答就给出简明答案；数据不足就明确说「当前结构化数据不足以可靠回答这个问题。」不要调用任何工具，也不要输出空内容。"
       );
@@ -194,7 +178,6 @@ export function createStoryAgent(
 ): Agent {
   // 设置 Ask 阅读进度边界
   repo.setUserChapter(cfg.userChapter);
-  const toolCallCounter = { count: 0 };
 
   const agent = new Agent({
     initialState: {
@@ -204,17 +187,6 @@ export function createStoryAgent(
     },
     streamFn: streamFn as any,
     toolExecution: "sequential",
-    beforeToolCall: async ({ toolCall }) => {
-      toolCallCounter.count++;
-      if (toolCallCounter.count > MAX_TOOL_TURNS) {
-        return {
-          block: true,
-          reason: `已达到最大工具调用次数（${MAX_TOOL_TURNS}）。请停止调用工具，直接根据已获取的数据回答。若数据不足，请明确回答「当前结构化数据不足以可靠回答这个问题。」`,
-          terminate: true,
-        };
-      }
-      return undefined;
-    },
   });
 
   return agent;

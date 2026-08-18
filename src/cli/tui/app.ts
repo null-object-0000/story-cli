@@ -454,6 +454,7 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
         content: `[系统提示] 当前阅读进度：第 ${cfg.userChapter} 章。所有工具检索结果只包含 ≤ 第 ${cfg.userChapter} 章的数据，不要提及或推测之后的内容。`,
         timestamp: Date.now(),
       } as any);
+      // 每题提问（无工具调用上限，由模型/上下文自然收敛）
       await agent.prompt(trimmed);
       // 空回答二次机会：模型可能检索到数据后忘了总结（或工具调用失败后直接返回空）——
       // 追加一条明确指令，要求它基于已检索数据回答或明确说数据不足（禁止再调工具、禁止空内容）
