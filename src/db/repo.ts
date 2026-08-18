@@ -287,13 +287,25 @@ export class StoryRepo {
     }
     return { id, created: true };
   }
+  /** Build 内部：按名字精确查找实体（不设 Reader 过滤；仅 Build/消歧使用，避免跨章节实体被 userChapter 过滤掉） */
+  findEntityByNameRaw(name: string): EntityRow | null {
+    const r = this.db.prepare("SELECT * FROM entities WHERE name=?").get(name) as EntityRow | undefined;
+    return r ?? null;
+  }
   renameEntity(id: string, newName: string): void {
     this.db.prepare("UPDATE entities SET name=? WHERE id=?").run(newName, id);
   }
 
   // ---------- aliases ----------
+  /** Build 内部：按 id 精确查找实体（不设 Reader 过滤；写路径完整性检查用） */
+  private getEntityByIdRaw(id: string): EntityRow | null {
+    const r = this.db.prepare("SELECT * FROM entities WHERE id=?").get(id) as EntityRow | undefined;
+    return r ?? null;
+  }
   addAlias(entityIdRef: string, alias: string, chapter: number, note?: string): "added" | "exists" | "clash" {
-    const e = this.getEntity(entityIdRef);
+    // 写路径（Build 入库）存在性检查：必须用【不过滤】的查询——否则 userChapter 低于
+    // 实体 first_seen_chapter 时（TUI 里 Build 与 Reader 共用 repo），会误判"实体不存在"
+    const e = this.getEntityByIdRaw(entityIdRef);
     if (!e) throw new Error(`别名指向不存在的实体: ${entityIdRef}`);
     // 别名与其他实体冲突？
     const other = this.findByAlias(alias);

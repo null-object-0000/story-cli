@@ -124,7 +124,7 @@ export async function answerQuestion(opts: {
   // 5. 构造结构化上下文
   const ctx: StructuredContext = buildContext(
     repo,
-    { book: cfg.book, userChapter },
+    { book: cfg.book.trim() || "当前小说", userChapter },
     question,
     intent,
     hits,

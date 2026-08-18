@@ -8,6 +8,7 @@
 ## 硬约束（不可破坏的不变式）
 1. **原文隔离**：`chapters` 表只有 Build 与 `src/cli/commands/import.ts` 能读；`src/reader/*`、`src/cli/tui/*` 的代码路径上**不存在**原文（`scripts/e2e.ts` 有静态检查）。
 2. **防剧透 = 数据访问层过滤**：所有 Reader 读方法经 `StoryRepo.setUserChapter(n)` 只返回 `chapter <= n` 的数据；不得改成依赖 prompt 自觉。
+   - **写路径与读路径分离**：Build 入库时 TUI 与 Reader 共用同一个 repo（此时 `userChapter` 已设置），因此 Build 的写路径内部解析**必须用不过滤的 raw 查询**——`addAlias` 的存在性检查用 `getEntityByIdRaw`、pipeline 的 `ensureEntity` 用 `findEntityByNameRaw`、`findEntityByTypeName` 本就不过滤。否则跨章节实体（`first_seen_chapter > userChapter`）会被误判为"不存在"（报"别名指向不存在的实体"）或重复建实体。改动 Build/DB 写入时保持这一分离。
 3. **校验不过不写库**：Build 的抽取输出必须先过 `validateExtractionOutput`（含 Batch Range 校验），再进事务。
 4. **数据修正权在 LLM，代码不静默改写输出**：校验失败 → 通过 `feedback` + `buildFixInstruction` 回传给 LLM 让它自己修；**禁止**在代码里悄悄改/丢模型输出（例如把非法 `newEntities.type` 自动改成 concept）。
 5. **能力/技能不是实体类型**：`ENTITY_TYPES` 只允许 `character|organization|location|item|concept`；能力走 `abilities` 数组。
@@ -22,7 +23,7 @@
 
 相关代码范围（触及即触发同步义务）：
 `src/cli/commands/*`（尤其 `init`/`import`/`build`/`ask`/`stats`/`audit`/`tui`）、`src/build/*`、`src/reader/*`、`src/llm/*`、`src/db/*`、`src/novel/*`、`src/config.ts`、`src/cli/tui/commands.ts`（其 `/build /import /status` 等斜杠命令复用上述流程）。
-> 当前命令面（精简后）：CLI = `init import build ask review audit stats tui`（原 `validate` 并入 `stats`、`character` 并入 `ask`、`audit-spoilers` 并入 `audit`）；TUI = `/help /status /settings /login /logout /config /chapter /build /import /review /audit /clear /exit`（`/status` 合并原 `/context /stats /progress /validate`；`/settings` 为交互式设置菜单、`/login` 为引导式 LLM 连接向导、`/logout` 清除已保存的 LLM 连接凭据；`/config` 按组 llm/build/reader 查看与修改配置，LLM/构建项保存后需重启 TUI 生效）。增减命令同样需要同步文档。
+> 当前命令面（精简后）：CLI = `init import build ask review audit stats tui`（原 `validate` 并入 `stats`、`character` 并入 `ask`、`audit-spoilers` 并入 `audit`）；TUI = `/help /status /settings /login /logout /chapter /build /import /review /audit /clear /exit`（`/status` 合并原 `/context /stats /progress /validate`；`/settings` 为交互式设置菜单、`/login` 为引导式 LLM 连接向导、`/build` 为独立构建面板（进度条随宽度自适应、实时 token 消耗、Esc 取消，聊天区零痕迹；结束后面板显示简洁版、完整批次明细输出到聊天区可滚动查看）——三者都只把输入区替换为面板，顶栏/聊天历史保留可见，期间不能干别的；`/settings` 只含通用配置 reader/build，LLM 连接归 `/login`、凭据清除归 `/logout`；`userChapter` 与 `build.*` 本就读实时配置立即生效，`/login` 保存与 `/logout` 会重建 provider/agent（`reloadLlm`）实时生效，**无需重启 TUI**）。增减命令同样需要同步文档。
 
 ## 常用命令
 ```bash

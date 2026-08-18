@@ -99,7 +99,7 @@ const commands: Record<string, CommandEntry> = {
       const { cmdTui } = await import("./commands/tui.js");
       return cmdTui(args.flags);
     },
-    help: "story tui [--provider openai|mock]   交互式小说问答界面（TUI，支持 / 斜杠命令：/help /chapter /build /import /status /review /audit /clear /exit；未初始化时会询问是否初始化）",
+    help: "story tui [--provider openai|mock]   交互式小说问答界面（TUI，支持 / 斜杠命令：/help /status /settings /login /logout /chapter /build /import /review /audit /clear /exit；未初始化时会询问是否初始化）",
   },
 };
 

@@ -59,7 +59,8 @@ export function costEstimate(inputTokens: number, uncachedInputTokens: number, o
 }
 
 export const DEFAULT_CONFIG: StoryConfig = {
-  book: "我不是戏神",
+  // book 不预设具体小说：未 import 前为空（顶部/提示用「未导入」兜底），import 时按文件名/--book 确定
+  book: "",
   userChapter: 1,
   build: { batchSize: 1, retries: 2, autoBatch: false, perChapterOutputTokens: 260, maxBatchChapters: 60 },
 };

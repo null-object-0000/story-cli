@@ -195,6 +195,20 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 - **Ask 代码路径上不存在原文**：`chapters` 表只有 Build/`src/cli/commands/import.ts` 能读；`scripts/e2e.ts` 有静态检查（`src/reader|src/cli/tui` 不得出现 `getChapterText`/`FROM chapters` 等）。
 - TUI 切换章节（`/chapter N`）会 **reset Agent 会话**，防止未来数据经对话上下文泄露。
 
+### TUI 问答呈现（app.ts / askAgent）
+- 呈现顺序对齐 pi code agent：**用户输入 → 工具调用逐条（🔧 调用 / ✓ 完成）→ 最终回答在最后**流式输出。
+- 工具调用 start 与 end 时都会把正在渲染的回答移到流底部（模型可能同轮"先答后调工具"，保证工具行聚在一起、回答永远在最后）。
+- 非流式 / 推理模型（如 glm 把回答塞进 `reasoning_content`）的兜底：`message_end` 只把最终消息的文本/thinking **记录下来不立即渲染**，agent 结束后仍无流式文本时才用它当回答（避免中间消息/推理内容提前出现在工具调用之前）。
+- 模型始终未返回文本时，诊断信息会带上**工具调用统计**（次数/失败数/失败工具名）帮助定位；系统提示词（`system-prompt.ts` 规则 8）要求工具调用带合法参数、失败后重试或基于已有数据回答、绝不返回空回复。
+- **空回答二次机会**（app.ts / askAgent）：模型做过工具调用却未返回任何文本（含最后消息兜底）时，追加一条明确指令要求它直接基于已检索数据回答或明确说数据不足（禁止再调工具、禁止空内容）——把"查到了却忘了总结"的常见情况自动救回。
+- **回答质量**：系统提示词（`system-prompt.ts` 回答风格）对列举/概览类问题（"有哪些神道/技能"）要求分组精炼、不全量罗列、不用分隔线；TUI markdown 主题把 `hr`（`---`）渲染成轻量 `· · ·` 分隔点，避免满屏横线。
+
+### Ask 会话日志（排查用）
+- 每轮 Ask（TUI 问答 与 `story ask`）把 agent 事件落盘 `.story/logs/ask/session-<时间戳>.jsonl`（`src/reader/ask-log.ts` 的 `AskSessionLogger` + `logAskEvent`）：用户问题、每条助手消息（text / thinking / toolCalls / stopReason）、工具调用参数与结果、最终答案、耗时与工具统计。
+- 用途：排查模型空回答 / 卡住 / 工具调用异常——直接看模型每轮到底输出了什么（text 还是 thinking、是否真为空）。
+- 只记录结构化数据与对话文本，**不落盘 chapters 原文**（符合原文隔离硬约束）。
+- TUI 里"⏳ 思考中…"每 3s 更新一次已等待秒数，避免误以为卡死。
+
 ---
 
 ## 5. 关键设计原则速查（改这块代码前必读）
@@ -211,21 +225,30 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 
 ## 6. TUI 界面化命令（/settings /login /logout）
 
-靠齐 pi code agent：交互式设置走 pi-tui 的 overlay 组件，LLM 连接走引导式向导。实现全部在 `src/cli/tui/menus.ts`，命令入口/补全在 `src/cli/tui/commands.ts`（`SLASH_COMMANDS` 注册），弹出能力由 `app.ts` 经 `CommandContext.ui` 注入（`openSettings` / `openLogin`）。
+靠齐 pi code agent。`/settings`、`/login`、`/build` 打开时通过 `setLayoutRoot` 用「顶栏 + 聊天历史 + 面板」重建布局根——**只把输入区（editor/bottomBar）替换为面板，顶栏和聊天历史保留可见**（不是整屏接管），关闭时还原基座布局并把焦点还给输入框。面板自身不画冗余标题（组件底部自带操作提示）。实现全部在 `src/cli/tui/menus.ts`，命令入口/补全在 `src/cli/tui/commands.ts`（`SLASH_COMMANDS` 注册），切换能力由 `app.ts` 经 `CommandContext.ui` 注入（`openSettings` / `openLogin` / `openBuild`；`MenuDeps` 携带 `topBar`/`scrollView`/`layoutRoot`/`focusTarget`）。注意：切换发生在 `onSubmit` 完成之后（`setTimeout(0)`），避免被末尾的 `setFocus(editor)` 抢走焦点；`/settings`/`/login`/`/build` 属 UI 命令（`UI_COMMANDS`），`CommandResult.noEcho=true`，**不在聊天区回显命令与结果**。
 
-### `/settings` — 交互式设置菜单
-- `openSettingsOverlay(tui, deps)` 用 pi-tui `SettingsList` 组件渲染全部配置项（reader / llm / build，含价格与推理参数）。
-- Enter/Space 修改：字符串/数字走 `Input` 子菜单（子菜单内校验数字合法性），枚举/布尔（thinkingFormat / extractReasoning / autoBatch / agentExtract / sessionLog）走 `values` 循环。
-- `/` 启用搜索过滤；Esc 关闭 overlay。
+### `/settings` — 交互式设置菜单（输入区替换为面板）
+- `openSettingsView(tui, deps)` 用 pi-tui `SettingsList` 组件渲染**通用配置**（reader.userChapter + build.*，**不含 llm.**——LLM 连接归 `/login`，凭据清除归 `/logout`）。
+- Enter/Space 修改：数字走 `Input` 子菜单（子菜单内校验数字合法性），布尔（autoBatch / agentExtract / sessionLog）走 `values` 循环；`/` 启用搜索过滤；Esc 返回聊天视图。
 - 每次改动立即 `saveConfig` 写 `.story/config.json`；`userChapter` 即时生效（`repo.setUserChapter` + 工具上下文 + `agent.reset()` 清历史防泄露）。
-- `llm.apiKey` 显示掩码 `••••xxxx`，编辑留空 = 保留原值（清除走 `/logout`）；其余字符串留空 = 删除该键、回退环境变量。
 
 ### `/login` — 引导式 LLM 连接向导
-- `openLoginOverlay(tui, deps)` 弹出自定义 `LoginWizard` 组件（overlay），分步：`baseUrl` → `apiKey` → `model` → **测试连接** → **保存并完成**；Esc 取消。
+- `openLoginView(tui, deps)` 把输入区替换为自定义 `LoginWizard` 面板，分步：`baseUrl` → `apiKey` → `model` → `thinkingFormat` → **测试连接** → **保存并完成**；Esc 返回。`thinkingFormat` 用 Enter 循环切换 `auto|deepseek|zai|qwen|openrouter|openai`（glm 系选 `zai`、deepseek 系选 `deepseek`；`auto` 自动识别）。
 - 测试连接：用当前输入合并出临时 config → `createProvider(cfg)` → `provider.complete([…], { stream:false, reasoning:"off" })`，成功显示模型名与回复、失败显示错误；连接信息不完整则提示将用 mock。
-- 保存：写入 `cfg.llm.{baseUrl,apiKey,model}` 并 `saveConfig`；留空项删除（回退环境变量）；完成后摘要经 `onNotify` 渲染到聊天区。
+- 保存：写入 `cfg.llm.{baseUrl,apiKey,model,thinkingFormat}` 并 `saveConfig`；留空项删除（回退环境变量）；保存后调用 `onLlmChanged`（app.ts 的 `reloadLlm`）**重建 provider/agent 并实时换入，无需重启**；完成后摘要经 `onNotify` 渲染到聊天区。
 - 语义：环境变量 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL` 始终优先于 config（`resolveLlmSettings`），`/login` 只是把连接写进 config。
+- **推理协议（glm 空回答问题）**：`src/llm/openai.ts` 的 `deepseekCompat` 会把 glm 系模型自动识别为 `thinkingFormat=zai` —— pi-ai 在 zai 格式下默认发送 `thinking:{type:"disabled"}`，模型回答才落在 `content`（否则 glm 会把整段回答塞进 `reasoning_content`、`content` 为空导致 Agent 拿不到文本）。另在 `app.ts` / `askAgent` 加了安全网：最终消息 `content` 为空时用 `thinking` 块兜底当回答。
 
 ### `/logout` — 清除已保存的 LLM 连接凭据
-- `clearLlmConnection(cfg)` 删除 `llm.baseUrl / llm.apiKey / llm.model`（保留价格与推理参数），`saveConfig` 后返回摘要。
-- 环境变量中的凭据不受影响；当前已加载的 provider 需重启 TUI 后按新配置重建。
+- `clearLlmConnection(cfg)` 删除 `llm.baseUrl / llm.apiKey / llm.model`（保留价格与推理参数），`saveConfig` 后调用 `ctx.ui.reloadLlm()` 实时重建（回到离线/mock 模式），返回摘要。
+- 环境变量中的凭据不受影响。
+
+### `/build` — 独立构建面板
+- `case "build"`（`src/cli/tui/commands.ts`）打开 `openBuildView`（`menus.ts`）构建面板，把输入区替换为面板：进度条/百分比、失败批次数、实时 token 消耗 + ETA、当前批次运行日志实时渲染；**构建中不能干别的，Esc 取消**（pipeline `runBuild` 新增 `signal` 选项，批间检查、当前批结束后停止），完成后 Esc 返回。
+- **进度条长度随面板/终端宽度自适应**（`BuildPanelHandle.width()`），并实时显示本次构建累计 token 消耗（`buildMetrics("extract")` 快照差量）。
+- 面板复用原有进度与汇总 markdown 格式化；`/build` 属 UI 命令（`UI_COMMANDS`），`CommandResult.noEcho=true`，**聊天区零痕迹**（无回显、无「执行中…」）；**结束后面板显示简洁版结果（避免长表格溢出），完整批次明细经 `ctx.onNotify` 输出到聊天区**（聊天区可滚动查看，关闭面板后仍有记录）。
+- `/build` 各 flag（`--from/--to/--force/--batch-size/--auto-batch/--no-agent/--keep-going`）与配置组 `build.*` 的语义不变。
+
+### 实时生效说明
+- `reader.userChapter`、`build.*`：本身就被 `/ask` `/build` 等实时读取，改动即时生效。
+- `llm.*`（provider/agent）：`/login` 保存与 `/logout` 后通过 `reloadLlm`（app.ts）重建 provider + agent（`createProvider` → `createStoryAgent`/`createOfflineAgent`）并换入运行中的应用，**全程无需重启 TUI**。

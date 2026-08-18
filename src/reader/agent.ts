@@ -10,6 +10,7 @@ import { StoryConfig } from "../config.js";
 import { LlmProvider } from "../llm/types.js";
 import { buildAgentSystemPrompt } from "./system-prompt.js";
 import { buildNovelTools, NovelToolContext } from "./tools.js";
+import { AskSessionLogger, logAskEvent } from "./ask-log.js";
 import { log } from "../logger.js";
 
 /** Agent 最大工具调用轮数（防止模型无限循环调用工具） */
@@ -87,9 +88,18 @@ export async function askAgent(
   let inputTokens = 0;
   let outputTokens = 0;
   let finalAnswer = "";
+  let lastAssistantText = ""; // 最后一条助手消息的文本/思考（非流式/推理模型兜底用）
   let currentToolCall: { name: string; args: Record<string, unknown> } | null = null;
+  let toolCalls = 0;
+  let toolFailures = 0;
+
+  // Ask 会话日志（.story/logs/ask/），排查模型空回答/卡住/工具异常用
+  const askLog = new AskSessionLogger();
+  const askStart = Date.now();
+  askLog.log({ kind: "question", text: question, meta: { userChapter: cfg.userChapter, book: cfg.book } });
 
   agent.subscribe((event) => {
+    logAskEvent(askLog, event);
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       const delta = event.assistantMessageEvent.delta;
       callbacks.onToken?.(delta);
@@ -103,18 +113,24 @@ export async function askAgent(
       } else if (msg.stopReason === "stop" || msg.stopReason === "toolUse") {
         // 非流式路径：从 content 提取文本
         const textBlocks = (msg.content ?? []).filter((c: any) => c.type === "text");
-        if (textBlocks.length && !finalAnswer) {
-          finalAnswer = textBlocks.map((t: any) => t.text).join("");
+        let text = textBlocks.map((t: any) => t.text).join("");
+        // 安全网：推理模型把整段回答放进 reasoning_content、content 为空时，用 thinking 块兜底
+        if (!text) {
+          const thinkBlocks = (msg.content ?? []).filter((c: any) => c.type === "thinking");
+          text = thinkBlocks.map((t: any) => t.thinking ?? "").join("");
         }
+        if (text) lastAssistantText = text; // 记录最后一条助手消息（工具调用消息通常无文本，最终答案消息覆盖它）
       }
     }
     if (event.type === "tool_execution_start") {
+      toolCalls++;
       currentToolCall = { name: event.toolName, args: event.args };
       callbacks.onToolCall?.(event.toolName, event.args);
     }
     if (event.type === "tool_execution_end") {
       if (currentToolCall) {
         const isError = (event as any).isError;
+        if (isError) toolFailures++;
         const summary = isError
           ? "执行失败"
           : `完成（${((event.result?.content?.[0] as any)?.text ?? "").slice(0, 60)}...）`;
@@ -135,6 +151,13 @@ export async function askAgent(
       timestamp: Date.now(),
     } as any);
     await agent.prompt(question);
+    // 空回答二次机会：模型可能检索到数据后忘了总结（或工具调用失败后直接返回空）——
+    // 追加一条明确指令，要求它基于已检索数据回答或明确说数据不足（禁止再调工具、禁止空内容）
+    if (!finalAnswer && !lastAssistantText && toolCallCounter.count > 0) {
+      await agent.prompt(
+        "请直接根据你刚才通过工具检索到的数据回答我上一个问题。能回答就给出简明答案；数据不足就明确说「当前结构化数据不足以可靠回答这个问题。」不要调用任何工具，也不要输出空内容。"
+      );
+    }
   } catch (e) {
     log(`Agent 执行出错: ${e instanceof Error ? e.message : String(e)}`);
     // 如果有 finalAnswer 就返回，否则返回错误提示
@@ -142,6 +165,15 @@ export async function askAgent(
       finalAnswer = "当前 Agent 执行过程中出现错误，无法回答。";
     }
   }
+
+  // 无流式文本（非流式/推理模型）时用最后一条助手消息的文本/思考兜底
+  if (!finalAnswer && lastAssistantText) {
+    finalAnswer = lastAssistantText;
+  }
+
+  // Ask 会话日志：最终答案与统计
+  askLog.log({ kind: "answer", text: finalAnswer, meta: { usedFallback: finalAnswer === lastAssistantText && !!lastAssistantText } });
+  askLog.log({ kind: "end", toolCalls, toolFailures, durationMs: Date.now() - askStart, meta: { logPath: askLog.path } });
 
   return {
     answer: finalAnswer,
@@ -202,9 +234,7 @@ export const OFFLINE_ANSWER = [
   "当前未配置真实 LLM，无法进行 Agent 问答。",
   "",
   "在 TUI 内直接配置（无需手动改文件）：",
-  "  /config llm.baseUrl=https://api.deepseek.com/v1",
-  "  /config llm.apiKey=<你的 Key>",
-  "  /config llm.model=deepseek-chat",
+  "  输入 /login 打开引导向导：baseUrl → apiKey → model → 测试连接 → 保存",
   "",
   "保存后重新运行 story tui（或 npm run dev）即可启用完整问答。",
   "",

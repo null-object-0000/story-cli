@@ -27,13 +27,15 @@ interface PiModels {
   model: any;
 }
 
-/** 推理模型协议判定：模型名含 deepseek/Qwen 等 → 强制对应 thinkingFormat，使 reasoning:"off" 真正生效。
- *  优先级：config.llm.thinkingFormat（经 PiAiProvider.thinkingFormat）> 环境变量 LLM_THINKING_FORMAT > 自动检测。 */
+/** 推理模型协议判定：模型名含 deepseek/Qwen/glm 等 → 强制对应 thinkingFormat，使 reasoning:"off" 真正生效。
+ *  优先级：config.llm.thinkingFormat（经 PiAiProvider.thinkingFormat）> 环境变量 LLM_THINKING_FORMAT > 自动检测。
+ *  glm 系（z.ai / 智谱 GLM）：thinkingFormat=zai —— pi-ai 在 zai 格式下默认发送 thinking:{type:"disabled"}，
+ *  模型回答才落在 content（否则 glm 会把整段回答塞进 reasoning_content、content 为空，导致 Agent 拿不到文本）。 */
 function deepseekCompat(modelName: string, thinkingFormat: string): Record<string, unknown> {
   const name = modelName.toLowerCase();
   const fmt = thinkingFormat.toLowerCase();
   const isDeepseek = fmt === "deepseek" || (fmt === "auto" && (name.includes("deepseek") || name.includes("ds-")));
-  const isZai = fmt === "zai";
+  const isZai = fmt === "zai" || (fmt === "auto" && name.includes("glm"));
   const isQwen = fmt === "qwen" || (fmt === "auto" && name.includes("qwen"));
   if (fmt === "openai") return {};
   if (isDeepseek) {

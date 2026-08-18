@@ -2,7 +2,8 @@
 // 新理念：导入【整本】小说，不再物理截断。Reader 的无剧透边界由 userChapter 在 Reader 层控制。
 
 import { readFileSync, existsSync } from "node:fs";
-import { loadConfig, dbPath } from "../../config.js";
+import { basename } from "node:path";
+import { loadConfig, dbPath, saveConfig } from "../../config.js";
 import { StoryRepo } from "../../db/repo.js";
 import { parseNovel, decodeNovel } from "../../novel/parser.js";
 import { log, warn, section } from "../../logger.js";
@@ -22,11 +23,16 @@ export async function cmdImport(opts: ImportOptions): Promise<number> {
   const cfg = loadConfig();
   const result = parseNovel(text);
 
+  // 书名：--book 显式指定 > 已有非空书名 > 从文件名推断（去扩展名）
+  const book = opts.book?.trim() || cfg.book?.trim() || basename(opts.path).replace(/\.[^.]+$/, "").trim();
+  cfg.book = book;
+  saveConfig(cfg);
+
   const repo = new StoryRepo(dbPath());
   try {
     // 全新导入：清空全部旧数据（保证不会残留上一本书/上一次导入的脏数据）
     resetAllData(repo);
-    repo.setMeta("book", cfg.book);
+    repo.setMeta("book", book);
     repo.setMeta("source_file", opts.path);
 
     repo.replaceChapters(result.chapters.map((c) => ({ number: c.number, title: c.title, text: c.text })));
@@ -36,7 +42,7 @@ export async function cmdImport(opts: ImportOptions): Promise<number> {
 
   section("导入结果");
   log(`文件      : ${opts.path}`);
-  log(`书目      : ${cfg.book}`);
+  log(`书目      : ${book}`);
   log(`识别章节  : ${result.chapters.length} 章（第 1 ~ ${result.chapters.length ? result.chapters[result.chapters.length - 1].number : 0} 章）`);
   log(`availableThrough : ${result.chapters.length ? result.chapters[result.chapters.length - 1].number : 0}（由 chapters 数据自动决定）`);
   if (result.duplicates) warn(`发现 ${result.duplicates} 个重复章节号，已按先出现者保留`);

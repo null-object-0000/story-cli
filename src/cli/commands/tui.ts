@@ -35,7 +35,7 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
     const offline = mode === "mock";
     if (offline) {
       warn("LLM 未配置（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL）：Agent 问答暂不可用，进入「未配置」状态");
-      warn("  在 TUI 内输入 /config llm 配置端点 / Key / 模型，保存后重启 story tui 即可问答；/build /status 等命令照常可用。");
+      warn("  在 TUI 内输入 /login 打开引导向导配置端点 / Key / 模型，保存后立即生效（无需重启）；/build /status 等命令照常可用。");
     }
 
     const toolCtx: NovelToolContext = {
@@ -53,12 +53,9 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
     const offlineWelcome = [
       "**LLM 未配置**：Agent 问答暂不可用，但这不阻碍你使用其它功能。",
       "",
-      "直接在此输入 `/config llm` 查看 LLM 配置组，或用：",
-      "- `/config llm.baseUrl=http://127.0.0.1:18640/v1`",
-      "- `/config llm.apiKey=sk-xxx`",
-      "- `/config llm.model=deepseek-chat`",
+      "输入 `/login` 打开引导向导，分步填写：baseUrl → apiKey → model → 测试连接 → 保存。",
       "",
-      "保存后**重启 story tui** 即可问答。其它命令照常可用：`/status`、`/chapter <N>`、`/review`、`/audit`、`/help`。",
+      "保存后**立即生效**（无需重启），即可开始 Agent 问答。其它命令照常可用：`/status`、`/chapter <N>`、`/review`、`/audit`、`/help`。",
     ].join("\n");
 
     await runTuiApp({
@@ -66,6 +63,7 @@ export async function cmdTui(flags: Record<string, string | boolean>): Promise<n
       repo,
       cfg,
       provider,
+      providerOverride: providerFlag as any | undefined,
       focus: toolCtx.focus,
       toolCtx,
       welcomeMessage: offline ? offlineWelcome : undefined,

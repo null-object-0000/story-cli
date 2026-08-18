@@ -42,6 +42,8 @@ export interface BuildOptions {
   /** 会话日志：每批把完整 prompt/回复/工具轨迹落盘为 JSONL（.story/logs/build/），
    *  供性能与准确度分析。默认 true（agent 抽取时生效）。 */
   sessionLog?: boolean;
+  /** 取消信号：批间检查；abort 后不再开始新批次（当前批次完成后停止）。用于 TUI 构建面板 Esc 取消。 */
+  signal?: AbortSignal;
 }
 
 export interface BuildProgress {
@@ -368,7 +370,9 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         else entityUpdates++;
       }
       const ensureEntity = (name: string, chapter: number): string | null => {
-        const ex = repo.findEntityByName(name);
+        // 用【不过滤】的按名查找：Build 入库不受 Reader userChapter 边界影响，
+        // 否则跨章节实体（first_seen_chapter > userChapter）会被误判为不存在而重复建实体
+        const ex = repo.findEntityByNameRaw(name);
         if (ex) {
           repo.upsertEntity(ex.type, name, chapter);
           return ex.id;
@@ -479,7 +483,9 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   // 否则后续抽取会引用缺失实体产生悬空引用。--keep-going 显式允许继续。
   const failFast = opts.failFast ?? true;
   for (const r of pending) {
+    if (opts.signal?.aborted) break; // 取消：不再开始新批次
     await processBatch(r);
+    if (opts.signal?.aborted) break; // 当前批次刚结束即被取消
     if (failFast && processed.some((p) => p.status === "failed")) {
       const failedRange = processed.filter((p) => p.status === "failed").map((p) => p.range).join(", ");
       const remaining = pending.filter((x) => x !== r);
