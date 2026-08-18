@@ -1,15 +1,15 @@
 // story tui：交互式小说问答界面（基于 pi-tui + pi-agent）
 
 import { existsSync } from "node:fs";
-import { loadConfig, dbPath, configPath, type StoryConfig } from "../config.js";
-import { StoryRepo } from "../db/repo.js";
-import { createProvider } from "../llm/index.js";
-import { createStoryAgent, createOfflineAgent } from "../agent/agent.js";
-import { NovelToolContext } from "../agent/tools.js";
+import { loadConfig, dbPath, configPath, type StoryConfig } from "../../config.js";
+import { StoryRepo } from "../../db/repo.js";
+import { createProvider } from "../../llm/index.js";
+import { createStoryAgent, createOfflineAgent } from "../../reader/agent.js";
+import { NovelToolContext } from "../../reader/tools.js";
 import { runTuiApp } from "../tui/app.js";
 import { confirmInit } from "../prompt.js";
 import { initializeProject, logInitSummary } from "./init.js";
-import { warn } from "../logger.js";
+import { warn } from "../../logger.js";
 
 export async function cmdTui(flags: Record<string, string | boolean>): Promise<number> {
   // 未初始化时不再直接报错：询问是否初始化，选「退出」则干净退出

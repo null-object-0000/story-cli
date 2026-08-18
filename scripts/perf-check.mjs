@@ -1,5 +1,9 @@
 import sqlite3 from "sqlite3";
-const db = new sqlite3.Database(".story/story.db", sqlite3.OPEN_READONLY);
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+// DB 路径相对脚本自身（项目根），从任意 cwd 运行都有效
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const db = new sqlite3.Database(join(root, ".story/story.db"), sqlite3.OPEN_READONLY);
 const q = (sql, params=[]) => new Promise((res, rej) => db.all(sql, params, (e, r) => e ? rej(e) : res(r)));
 (async () => {
   console.log("=== llm_logs 列 ===");

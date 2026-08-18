@@ -26,11 +26,11 @@ import {
   matchesKey,
   type TuiInputListenerResult,
 } from "@earendil-works/pi-tui";
-import { StoryRepo } from "../db/repo.js";
-import { StoryConfig } from "../config.js";
-import { LlmProvider } from "../llm/types.js";
+import { StoryRepo } from "../../db/repo.js";
+import { StoryConfig } from "../../config.js";
+import { LlmProvider } from "../../llm/types.js";
 import { runSlashCommand, commandHint, SLASH_COMMANDS } from "./commands.js";
-import { estimateTokens } from "../util.js";
+import { estimateTokens } from "../../util.js";
 
 // ── 简单主题 ──────────────────────────────────────
 

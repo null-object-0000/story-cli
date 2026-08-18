@@ -14,7 +14,7 @@ import { LlmProvider, ExtractionInput, ExtractionResult } from "../llm/types.js"
 import { extractJson } from "../llm/openai.js";
 import { EXTRACTION_SYSTEM_PROMPT, buildFixInstruction } from "./prompts.js";
 import type { BuildSessionLogger } from "./session-log.js";
-import type { NovelTool } from "../agent/tools.js";
+import type { NovelTool } from "../reader/tools.js";
 import { log, warn } from "../logger.js";
 
 /** 从 pi-ai 的 content 块（thinking + text）中提取纯文本（会话日志用） */

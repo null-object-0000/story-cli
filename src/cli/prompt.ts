@@ -4,7 +4,7 @@
 
 import { createInterface as createInterfacePromises } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { configPath } from "./config.js";
+import { configPath } from "../config.js";
 
 export interface SelectOptions {
   /** 选项上方的说明文字（仅首次渲染显示） */

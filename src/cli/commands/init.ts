@@ -5,9 +5,9 @@
 // 章节最大值变化不再触发重建 DB——schema 不再把最大章节号编译进去。
 
 import { existsSync } from "node:fs";
-import { initProject, loadConfig, projectDir, dbPath, ensureProjectDir, type StoryConfig } from "../config.js";
-import { StoryRepo } from "../db/repo.js";
-import { log } from "../logger.js";
+import { initProject, loadConfig, projectDir, dbPath, ensureProjectDir, type StoryConfig } from "../../config.js";
+import { StoryRepo } from "../../db/repo.js";
+import { log } from "../../logger.js";
 
 export async function cmdInit(args: { positional: string[]; flags: Record<string, string | boolean> }): Promise<number> {
   const book = typeof args.flags["--book"] === "string" ? args.flags["--book"] : undefined;

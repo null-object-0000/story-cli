@@ -45,14 +45,14 @@ function parseArgs(argv: string[]): { command: string; positional: string[]; fla
 const commands: Record<string, CommandEntry> = {
   init: {
     run: async (args) => {
-      const { cmdInit } = await import("./cmd/init.js");
+      const { cmdInit } = await import("./commands/init.js");
       return cmdInit(args);
     },
     help: "story init [--book 书名] [--user-chapter N]     创建项目（默认 userChapter=1）",
   },
   import: {
     run: async (args) => {
-      const { cmdImport } = await import("./cmd/import.js");
+      const { cmdImport } = await import("./commands/import.js");
       if (!args.positional.length) throw new Error("用法：story import <小说文件路径>");
       return cmdImport({ path: args.positional[0], book: args.flags["--book"] as string | undefined });
     },
@@ -60,21 +60,21 @@ const commands: Record<string, CommandEntry> = {
   },
   build: {
     run: async (args) => {
-      const { cmdBuild } = await import("./cmd/build.js");
+      const { cmdBuild } = await import("./commands/build.js");
       return cmdBuild(args.flags, args.positional);
     },
     help: "story build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going] [--provider openai|mock] [--retries N]  抽取结构化数据（默认构建已导入未构建的全部章节；--to N 为本次构建任务结束章节）",
   },
   review: {
     run: async (args) => {
-      const { cmdReview } = await import("./cmd/review.js");
+      const { cmdReview } = await import("./commands/review.js");
       return cmdReview(args.flags);
     },
     help: "story review [--auto]   人工审核（可疑重复、低置信度事实、冲突）",
   },
   ask: {
     run: async (args) => {
-      const { cmdAsk } = await import("./cmd/ask.js");
+      const { cmdAsk } = await import("./commands/ask.js");
       if (!args.positional.length) throw new Error("用法：story ask <问题>");
       return cmdAsk(args.positional.join(" "), args.flags);
     },
@@ -82,21 +82,21 @@ const commands: Record<string, CommandEntry> = {
   },
   stats: {
     run: async () => {
-      const { cmdStats } = await import("./cmd/stats.js");
+      const { cmdStats } = await import("./commands/stats.js");
       return cmdStats();
     },
     help: "story stats   数据与成本统计 + 构建性能 + 完整性校验（含 story validate；严重错误 → exit 1）",
   },
   audit: {
     run: async (args) => {
-      const { cmdAuditSpoilers } = await import("./cmd/spoilers.js");
-      return cmdAuditSpoilers(args.flags);
+      const { cmdAudit } = await import("./commands/audit.js");
+      return cmdAudit(args.flags);
     },
     help: "story audit [--chapter N]   Reader 可见性审计（验证 Reader API 不泄露超出 userChapter 的数据）",
   },
   tui: {
     run: async (args) => {
-      const { cmdTui } = await import("./cmd/tui.js");
+      const { cmdTui } = await import("./commands/tui.js");
       return cmdTui(args.flags);
     },
     help: "story tui [--provider openai|mock]   交互式小说问答界面（TUI，支持 / 斜杠命令：/help /chapter /build /import /status /review /audit /clear /exit；未初始化时会询问是否初始化）",

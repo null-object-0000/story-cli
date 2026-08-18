@@ -11,10 +11,10 @@
 
 | 命令 | 命令入口 | 核心实现 | 直接写入/读取的表 |
 |---|---|---|---|
-| `story init` | `src/cmd/init.ts` → `cmdInit` | `initializeProject` → `config.initProject` + `new StoryRepo` | 创建 `.story/config.json`、`story.db`（建 schema） |
-| `story import <文件>` | `src/cmd/import.ts` → `cmdImport` | `novel/parser`（`decodeNovel`+`parseNovel`）→ `resetAllData` → `repo.replaceChapters` | 清空 14 张业务表 → 写 `chapters` |
-| `story build` | `src/cmd/build.ts` → `cmdBuild` | `build/pipeline.ts` → `runBuild`（分批→抽取→校验→重试→事务入库） | 全部结构化表 + `batch_state` + `llm_logs` |
-| `story ask <问题>` | `src/cmd/ask.ts` → `cmdAsk` | Agent 路径：`agent/agent.ts` → `askAgent`；传统路径：`ask/answer.ts` → `answerQuestion` | 只读全部结构化表（受 `userChapter` 过滤）+ 写 `llm_logs` |
+| `story init` | `src/cli/commands/init.ts` → `cmdInit` | `initializeProject` → `config.initProject` + `new StoryRepo` | 创建 `.story/config.json`、`story.db`（建 schema） |
+| `story import <文件>` | `src/cli/commands/import.ts` → `cmdImport` | `novel/parser`（`decodeNovel`+`parseNovel`）→ `resetAllData` → `repo.replaceChapters` | 清空 14 张业务表 → 写 `chapters` |
+| `story build` | `src/cli/commands/build.ts` → `cmdBuild` | `build/pipeline.ts` → `runBuild`（分批→抽取→校验→重试→事务入库） | 全部结构化表 + `batch_state` + `llm_logs` |
+| `story ask <问题>` | `src/cli/commands/ask.ts` → `cmdAsk` | Agent 路径：`reader/agent.ts` → `askAgent`；传统路径：`reader/answer.ts` → `answerQuestion` | 只读全部结构化表（受 `userChapter` 过滤）+ 写 `llm_logs` |
 
 三个贯穿性概念（详见 README §4）：
 
@@ -43,7 +43,7 @@ cmdInit
 ### 关键点
 - **不再存 `maxChapter`**（V0.1 收口）：schema 不把最大章节号编译进 CHECK，章节数变化永远不会触发重建 DB。
 - `userChapter` 默认 1（保守，Ask 只返回第 1 章前的数据）。
-- `initializeProject` / `logInitSummary` 同时被 **TUI 未初始化时的自动初始化**复用（`src/tui/app.ts`）。
+- `initializeProject` / `logInitSummary` 同时被 **TUI 未初始化时的自动初始化**复用（`src/cli/tui/app.ts`）。
 
 ---
 
@@ -157,8 +157,8 @@ cmdAsk(question, flags)
 
 ### 路径 A：Agent 驱动（LLM 模式 + provider 支持 `getAgentKit`）
 ```
-askAgent(provider, repo, cfg, question)     # agent/agent.ts
- ├─ new Agent(pi-agent-core) + buildNovelTools(toolCtx)   # agent/tools.ts
+askAgent(provider, repo, cfg, question)     # reader/agent.ts
+ ├─ new Agent(pi-agent-core) + buildNovelTools(toolCtx)   # reader/tools.ts
  │     工具（全部只读结构化、受 userChapter 过滤）：
  │     search_entities / get_entity / list_abilities / get_relations / list_events /
  │     get_entity_index / get_progress / list_chapters / set_chapter_focus
@@ -169,17 +169,17 @@ askAgent(provider, repo, cfg, question)     # agent/agent.ts
 
 ### 路径 B：传统管道（无 Agent 支持 或 mock 模式）
 ```
-answerQuestion({ repo, cfg, provider, mode, question })   # ask/answer.ts
+answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
  ├─ 1. 能力名预匹配：问题包含已知能力名 → 定位其 Owner 实体
- ├─ 2. Intent：classifyIntent(question)     # ask/intent.ts（启发式正则）
+ ├─ 2. Intent：classifyIntent(question)     # reader/intent.ts（启发式正则）
  │      RECALL_CHARACTER / LIST_ABILITIES / ABILITY_LOOKUP / CHARACTER_RELATION /
  │      CHARACTER_HISTORY / LAST_APPEARANCE / ENTITY_SEARCH / GENERAL_STRUCTURED_QA
- ├─ 3. 实体解析：searchEntities(repo, question, topK)   # ask/search.ts
+ ├─ 3. 实体解析：searchEntities(repo, question, topK)   # reader/search.ts
  │      · 名称/别名 精确/包含 + shingle(2) 重叠打分（身份/锚点/事件/关系文本参与）
  │      · "主角"关键词命中 → 主角提权
  ├─ 4. 弱命中兜底：LLM 模式无命中或分数过低 → 给 LLM 结构化实体索引（buildEntityIndexDigest）做二次消歧
- ├─ 5. 构造上下文 buildContext → StructuredContext（ask/context.ts）
- │      EntityCard = 别名 + 身份/性格事实 + RecallAnchor（ask/recall.ts 排序：importance/
+ ├─ 5. 构造上下文 buildContext → StructuredContext（reader/context.ts）
+ │      EntityCard = 别名 + 身份/性格事实 + RecallAnchor（reader/recall.ts 排序：importance/
  │      memorability/主角相关性/最近性 加权）+ 关系 + 近期事件
  ├─ 6. 充分性判断：
  │      · 无任何命中 → 不足
@@ -192,7 +192,7 @@ answerQuestion({ repo, cfg, provider, mode, question })   # ask/answer.ts
 
 ### 防剧透实现（Ask 的核心约束）
 - **数据访问层过滤**：`StoryRepo.setUserChapter(n)` 后，所有读方法（`listEntities / findEntityByName / findByAlias / getEntity / listFacts / listRelations / listAbilities / listEvents / listMemoryAnchors / listAppearances / listChapterMeta`）只返回 `chapter / first_seen_chapter / from_chapter <= n` 的数据；未来实体"存在本身"也表现为不存在。
-- **Ask 代码路径上不存在原文**：`chapters` 表只有 Build/`cmd/import.ts` 能读；`scripts/e2e.ts` 有静态检查（`src/ask|src/agent|src/tui` 不得出现 `getChapterText`/`FROM chapters` 等）。
+- **Ask 代码路径上不存在原文**：`chapters` 表只有 Build/`src/cli/commands/import.ts` 能读；`scripts/e2e.ts` 有静态检查（`src/reader|src/cli/tui` 不得出现 `getChapterText`/`FROM chapters` 等）。
 - TUI 切换章节（`/chapter N`）会 **reset Agent 会话**，防止未来数据经对话上下文泄露。
 
 ---

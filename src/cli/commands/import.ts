@@ -2,10 +2,10 @@
 // 新理念：导入【整本】小说，不再物理截断。Reader 的无剧透边界由 userChapter 在 Reader 层控制。
 
 import { readFileSync, existsSync } from "node:fs";
-import { loadConfig, dbPath } from "../config.js";
-import { StoryRepo } from "../db/repo.js";
-import { parseNovel, decodeNovel } from "../novel/parser.js";
-import { log, warn, section } from "../logger.js";
+import { loadConfig, dbPath } from "../../config.js";
+import { StoryRepo } from "../../db/repo.js";
+import { parseNovel, decodeNovel } from "../../novel/parser.js";
+import { log, warn, section } from "../../logger.js";
 
 export interface ImportOptions {
   path: string;

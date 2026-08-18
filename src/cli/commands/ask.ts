@@ -3,12 +3,12 @@
 //   LLM mode → 基于 pi-agent-core 的 Agent 驱动（工具调用 + 流式输出）
 //   Mock mode → 模板回答器（离线验证管道）
 
-import { loadConfig, dbPath } from "../config.js";
-import { StoryRepo } from "../db/repo.js";
-import { createProvider } from "../llm/index.js";
-import { answerQuestion, recordAskLog } from "../ask/answer.js";
-import { askAgent } from "../agent/agent.js";
-import { log, warn } from "../logger.js";
+import { loadConfig, dbPath } from "../../config.js";
+import { StoryRepo } from "../../db/repo.js";
+import { createProvider } from "../../llm/index.js";
+import { answerQuestion, recordAskLog } from "../../reader/answer.js";
+import { askAgent } from "../../reader/agent.js";
+import { log, warn } from "../../logger.js";
 
 export async function cmdAsk(question: string, flags: Record<string, string | boolean>): Promise<number> {
   const cfg = loadConfig();

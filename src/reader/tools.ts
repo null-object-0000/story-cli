@@ -5,9 +5,9 @@
 import { Type } from "typebox";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { StoryRepo } from "../db/repo.js";
-import { searchEntities } from "../ask/search.js";
-import { buildEntityCard, EntityCard } from "../ask/context.js";
-import { buildEntityIndexDigest } from "../ask/answer.js";
+import { searchEntities } from "./search.js";
+import { buildEntityCard, EntityCard } from "./context.js";
+import { buildEntityIndexDigest } from "./answer.js";
 import { stableJson } from "../util.js";
 
 // 本地工具类型：pi 的 AgentTool<any> 会把 execute 的 params 解析为 unknown，

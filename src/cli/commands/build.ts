@@ -1,10 +1,10 @@
 // story build：分批量 LLM 抽取 + 断点续跑 + 重试 + 成本统计
 
-import { loadConfig, dbPath, resolveLlmPrices, costEstimate } from "../config.js";
-import { StoryRepo } from "../db/repo.js";
-import { runBuild } from "../build/pipeline.js";
-import { createProvider } from "../llm/index.js";
-import { log, warn, section } from "../logger.js";
+import { loadConfig, dbPath, resolveLlmPrices, costEstimate } from "../../config.js";
+import { StoryRepo } from "../../db/repo.js";
+import { runBuild } from "../../build/pipeline.js";
+import { createProvider } from "../../llm/index.js";
+import { log, warn, section } from "../../logger.js";
 
 export async function cmdBuild(
   flags: Record<string, string | boolean>,

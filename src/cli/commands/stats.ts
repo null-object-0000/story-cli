@@ -1,10 +1,10 @@
 // story stats：数据量 / LLM 成本 / 构建性能 / 完整性校验（合并了原 story validate）
 // 严重完整性错误 → exit code 1（供脚本/自动化判断）
 
-import { loadConfig, dbPath, resolveLlmPrices, costEstimate } from "../config.js";
-import { StoryRepo } from "../db/repo.js";
-import { log, warn, section } from "../logger.js";
-import { pad as padFlat } from "../util.js";
+import { loadConfig, dbPath, resolveLlmPrices, costEstimate } from "../../config.js";
+import { StoryRepo } from "../../db/repo.js";
+import { log, warn, section } from "../../logger.js";
+import { pad as padFlat } from "../../util.js";
 
 interface IntegrityIssues {
   errors: string[];

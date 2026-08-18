@@ -1,15 +1,15 @@
 {
-  "name": "story-cli",
+  "name": "storypack",
   "version": "0.1.0",
   "private": true,
-  "description": "长篇小说结构化知识 + 无剧透问答 CLI（Agent 驱动）",
+  "description": "让每一本故事拥有一个会随着读者一起成长、绝不剧透、并以这个故事自己的方式呈现知识的智能百科与阅读伴侣",
   "type": "module",
   "bin": {
-    "story": "dist/src/cli.js"
+    "story": "dist/src/cli/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "npm run build && node dist/src/cli.js tui"
+    "dev": "npm run build && node dist/src/cli/index.js tui"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

@@ -6,10 +6,10 @@
 
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { loadConfig, dbPath } from "../config.js";
-import { StoryRepo } from "../db/repo.js";
-import { suggestDuplicatesByAlias } from "../build/resolution.js";
-import { log, warn, section } from "../logger.js";
+import { loadConfig, dbPath } from "../../config.js";
+import { StoryRepo } from "../../db/repo.js";
+import { suggestDuplicatesByAlias } from "../../build/resolution.js";
+import { log, warn, section } from "../../logger.js";
 
 export async function cmdReview(flags: Record<string, string | boolean>): Promise<number> {
   const cfg = loadConfig();

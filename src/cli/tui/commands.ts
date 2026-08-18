@@ -2,9 +2,9 @@
 // 像 Claude Code 一样，在输入框输入 /xxx 执行运维操作，结果渲染到聊天区
 // 命令注册表 SLASH_COMMANDS 同时驱动 pi-tui Editor 的斜杠命令自动补全
 
-import { StoryRepo } from "../db/repo.js";
-import { StoryConfig, saveConfig } from "../config.js";
-import { LlmProvider } from "../llm/types.js";
+import { StoryRepo } from "../../db/repo.js";
+import { StoryConfig, saveConfig } from "../../config.js";
+import { LlmProvider } from "../../llm/types.js";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { SlashCommand } from "@earendil-works/pi-tui";
 
@@ -196,7 +196,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       // ── 数据 & 成本 & 性能 & 完整性（复用 cmdStats，含退出码） ──
       lines.push("");
       lines.push("### 数据 & 成本 & 性能 & 完整性");
-      const { cmdStats } = await import("../cmd/stats.js");
+      const { cmdStats } = await import("../commands/stats.js");
       const { result, output } = await captureConsole(() => cmdStats());
       lines.push("```");
       lines.push(output.trim());
@@ -222,7 +222,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       }
       // 更新 config
       cfg.userChapter = n;
-      const { saveConfig } = await import("../config.js");
+      const { saveConfig } = await import("../../config.js");
       saveConfig(cfg);
       // 更新 repo 过滤边界 — 实时生效（repo 是同一引用）
       repo.setUserChapter(n);
@@ -249,12 +249,12 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       if (chapters === 0) {
         return { text: "chapters 为空，请先 `/import` 导入小说文件。" };
       }
-      const { runBuild } = await import("../build/pipeline.js");
+      const { runBuild } = await import("../../build/pipeline.js");
 
       // 进度回调：每批开始/完成时更新 TUI（使用 ctx.onProgress 流式渲染）
       const batchResults: { range: string; status: string; }[] = [];
       const onProgress = ctx.onProgress
-        ? (p: import("../build/pipeline.js").BuildProgress) => {
+        ? (p: import("../../build/pipeline.js").BuildProgress) => {
             // 记录批次状态（range 为空表示"无待处理"的初始化事件，跳过）
             if (p.range) {
               const idx = batchResults.findIndex((b) => b.range === p.range);
@@ -369,7 +369,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       if (!existsSync(absPath)) {
         return { text: `文件不存在：${path}` };
       }
-      const { cmdImport } = await import("../cmd/import.js");
+      const { cmdImport } = await import("../commands/import.js");
       const { result, output } = await captureConsole(() =>
         cmdImport({
           path: absPath,
@@ -393,7 +393,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
 
     // ── 审核 ──
     case "review": {
-      const { cmdReview } = await import("../cmd/review.js");
+      const { cmdReview } = await import("../commands/review.js");
       const revFlags: Record<string, string | boolean> = {};
       if (flags["--auto"]) revFlags["--auto"] = true;
       const { result, output } = await captureConsole(() => cmdReview(revFlags));
@@ -411,8 +411,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
 
     // ── 防剧透审计 ──
     case "audit": {
-      const { cmdAuditSpoilers } = await import("../cmd/spoilers.js");
-      const { result, output } = await captureConsole(() => cmdAuditSpoilers());
+      const { cmdAudit } = await import("../commands/audit.js");
+      const { result, output } = await captureConsole(() => cmdAudit());
       const status = result === 0 ? "✅ 无越界" : "❌ 发现越界章节";
       const lines = [
         "## 防剧透审计",

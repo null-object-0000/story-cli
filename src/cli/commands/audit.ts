@@ -1,4 +1,4 @@
-// story audit / story audit-spoilers：Reader Visibility Audit（读者可见性审计）
+// story audit：Reader Visibility Audit（读者可见性审计）
 //
 // V0.1 收口后的新语义：
 //   旧审计检查“数据库里有没有 chapter > maxChapter 的记录”——这已无意义，因为完整 Story DB
@@ -14,10 +14,10 @@
 //
 // 用法：story audit [--chapter N]（缺省 N = config.userChapter）
 
-import { loadConfig, dbPath } from "../config.js";
-import { StoryRepo, EntityRow, AliasRow, FactRow, RelationRow, AbilityRow, EventRow, MemoryAnchorRow } from "../db/repo.js";
-import { searchEntities } from "../ask/search.js";
-import { log, warn, section } from "../logger.js";
+import { loadConfig, dbPath } from "../../config.js";
+import { StoryRepo, EntityRow, AliasRow, FactRow, RelationRow, AbilityRow, EventRow, MemoryAnchorRow } from "../../db/repo.js";
+import { searchEntities } from "../../reader/search.js";
+import { log, warn, section } from "../../logger.js";
 
 interface Violation {
   api: string;
@@ -32,7 +32,7 @@ interface AuditRow {
   violations: number;
 }
 
-export async function cmdAuditSpoilers(flags: Record<string, string | boolean> = {}): Promise<number> {
+export async function cmdAudit(flags: Record<string, string | boolean> = {}): Promise<number> {
   const cfg = loadConfig();
   const repo = new StoryRepo(dbPath());
   try {

@@ -17,12 +17,12 @@ import { DatabaseSync } from "node:sqlite";
 import { buildNovelText } from "./make-fixture.js";
 import { StoryRepo } from "../src/db/repo.js";
 import { validateExtractionOutput, ValidationError } from "../src/build/validation.js";
-import { searchEntities } from "../src/ask/search.js";
+import { searchEntities } from "../src/reader/search.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // 编译后本文件在 dist/scripts/ 下，项目根在其上两级
 const ROOT = join(__dirname, "..", "..");
-const CLI = join(ROOT, "dist", "src", "cli.js");
+const CLI = join(ROOT, "dist", "src", "cli", "index.js");
 const PROJ = join(ROOT, "test", ".e2e", "proj");
 const UNIT = join(ROOT, "test", ".e2e", "unit");
 const FIXTURE = join(PROJ, "我不是戏神.txt");
@@ -430,12 +430,11 @@ function main(): number {
     unit.close();
   });
 
-  // ---- 17. 静态检查：Ask/Agent/TUI 模块绝不触碰 chapters 原文表 ----
-  test("Ask 模块不读取原文", () => {
+  // ---- 17. 静态检查：Reader/TUI 模块绝不触碰 chapters 原文表 ----
+  test("Reader/TUI 模块不读取原文", () => {
     const dirs: { dir: string; files: string[] }[] = [
-      { dir: join(ROOT, "src", "ask"), files: ["answer.ts", "context.ts", "intent.ts", "recall.ts", "search.ts"] },
-      { dir: join(ROOT, "src", "agent"), files: readdirSync(join(ROOT, "src", "agent")).filter((f) => f.endsWith(".ts")) },
-      { dir: join(ROOT, "src", "tui"), files: readdirSync(join(ROOT, "src", "tui")).filter((f) => f.endsWith(".ts")) },
+      { dir: join(ROOT, "src", "reader"), files: readdirSync(join(ROOT, "src", "reader")).filter((f) => f.endsWith(".ts")) },
+      { dir: join(ROOT, "src", "cli", "tui"), files: readdirSync(join(ROOT, "src", "cli", "tui")).filter((f) => f.endsWith(".ts")) },
     ];
     for (const { dir, files } of dirs) {
       for (const f of files) {
@@ -445,11 +444,8 @@ function main(): number {
             throw new Error(`${dir}/${f} 疑似触碰 chapters 原文：包含「${forbidden}」`);
           }
         }
-        if (/from\s+["']\.\.\/novel/.test(content)) {
-          throw new Error(`${dir}/${f} 引用了 novel 模块（原文路径）`);
-        }
-        if (/from\s+["']\.\.\/build/.test(content)) {
-          throw new Error(`${dir}/${f} 引用了 build 模块（原文路径）。仅 src/agent/ops.ts 允许。`);
+        if (/from\s+["'](?:\.\.\/)+(build|novel)\//.test(content)) {
+          throw new Error(`${dir}/${f} 引用了 build/novel 模块（原文路径）`);
         }
       }
     }
