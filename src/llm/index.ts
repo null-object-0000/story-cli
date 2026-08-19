@@ -37,5 +37,7 @@ export function createProvider(cfg: StoryConfig): LlmProvider {
     // 用户自配置（config.llm 字段；环境变量仍可覆盖，见 PiAiProvider）
     thinkingFormat: cfg.llm?.thinkingFormat,
     extractReasoning: cfg.llm?.extractReasoning,
+    contextWindow: cfg.llm?.contextWindow,
+    maxTokens: cfg.llm?.maxTokens,
   });
 }

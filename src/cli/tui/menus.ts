@@ -189,7 +189,7 @@ function buildSettingsItems(deps: MenuDeps): SettingItem[] {
     field("userChapter", "reader · userChapter", "number", String(cfg.userChapter), "阅读进度，Ask/TUI 防剧透边界（也可用 /chapter N 即时切换）"),
     field("build.batchSize", "build · batchSize", "number", String(cfg.build?.batchSize ?? 1), "固定模式每批章节数"),
     field("build.retries", "build · retries", "number", String(cfg.build?.retries ?? 2), "批内失败重试次数"),
-    cycle("build.autoBatch", "build · autoBatch", String(cfg.build?.autoBatch ?? false), ["true", "false"], "按上下文自动合并批次"),
+    cycle("build.autoBatch", "build · autoBatch", String(cfg.build?.autoBatch ?? true), ["true", "false"], "按上下文自动合并批次"),
     field("build.perChapterOutputTokens", "build · perChapterOutputTokens", "number", String(cfg.build?.perChapterOutputTokens ?? 260), "每章结构化输出的 token 估算（输出预算）"),
     field("build.maxBatchChapters", "build · maxBatchChapters", "number", String(cfg.build?.maxBatchChapters ?? 60), "单批章节数上限"),
     cycle("build.sessionLog", "build · sessionLog", String(cfg.build?.sessionLog ?? true), ["true", "false"], "构建会话日志落盘 .story/logs/build/"),
@@ -250,7 +250,8 @@ type WizardRow = { key: string; label: string; value: string; action?: boolean; 
 
 /**
  * /login：引导式 LLM 连接向导（对齐 pi code agent 的 /login 交互模式）。
- * 步骤：baseUrl → apiKey → model → thinkingFormat → 测试连接 → 保存并完成；Esc 取消。
+ * 步骤：baseUrl → apiKey → model → thinkingFormat → contextWindow → maxTokens → 测试连接 → 保存并完成；Esc 取消。
+ * contextWindow/maxTokens 留空 = 回落默认/环境变量。
  * 保存只写 .story/config.json 的 llm.*，环境变量优先语义不变。
  */
 class LoginWizard implements Component {
@@ -258,7 +259,7 @@ class LoginWizard implements Component {
   private status = "";
   private busy = false;
   private editing: { input: Input } | null = null;
-  private vals = { baseUrl: "", apiKey: "", model: "", thinking: "auto" };
+  private vals = { baseUrl: "", apiKey: "", model: "", thinking: "auto", contextWindow: "", maxTokens: "" };
 
   constructor(
     private deps: MenuDeps,
@@ -270,6 +271,8 @@ class LoginWizard implements Component {
     this.vals.apiKey = deps.cfg.llm?.apiKey ?? "";
     this.vals.model = deps.cfg.llm?.model ?? "";
     this.vals.thinking = deps.cfg.llm?.thinkingFormat ?? "auto";
+    this.vals.contextWindow = deps.cfg.llm?.contextWindow ? String(deps.cfg.llm.contextWindow) : "";
+    this.vals.maxTokens = deps.cfg.llm?.maxTokens ? String(deps.cfg.llm.maxTokens) : "";
   }
 
   private rows(): WizardRow[] {
@@ -278,6 +281,8 @@ class LoginWizard implements Component {
       { key: "apiKey", label: "apiKey", value: this.vals.apiKey ? yellow(maskSecret(this.vals.apiKey)) : dim("（未设置）") },
       { key: "model", label: "model", value: this.vals.model || dim("（留空用环境变量）") },
       { key: "thinking", label: "thinkingFormat", value: this.vals.thinking, cycle: true },
+      { key: "contextWindow", label: "contextWindow", value: this.vals.contextWindow || dim("（空 = 默认 128000）") },
+      { key: "maxTokens", label: "maxTokens", value: this.vals.maxTokens || dim("（空 = 默认 8192）") },
       { key: "test", label: "▶ 测试连接", value: "", action: true },
       { key: "save", label: "💾 保存并完成", value: "", action: true },
     ];
@@ -347,7 +352,7 @@ class LoginWizard implements Component {
       return;
     }
     const input = new Input();
-    const key = row.key as "baseUrl" | "apiKey" | "model";
+    const key = row.key as "baseUrl" | "apiKey" | "model" | "contextWindow" | "maxTokens";
     prefillInput(input, key === "apiKey" ? "" : this.vals[key]);
     input.onSubmit = (v) => {
       this.vals[key] = v.trim();
@@ -408,6 +413,11 @@ class LoginWizard implements Component {
     } else {
       delete llm.thinkingFormat;
     }
+    // 上下文窗口 / 最大输出：正整数才写入，留空删除（回落默认或环境变量）
+    if (this.vals.contextWindow && /^\d+$/.test(this.vals.contextWindow)) llm.contextWindow = parseInt(this.vals.contextWindow, 10);
+    else delete llm.contextWindow;
+    if (this.vals.maxTokens && /^\d+$/.test(this.vals.maxTokens)) llm.maxTokens = parseInt(this.vals.maxTokens, 10);
+    else delete llm.maxTokens;
     this.deps.cfg.llm = llm;
     saveConfig(this.deps.cfg);
     // 重建 provider/agent：LLM 配置实时生效（无需重启）
@@ -424,6 +434,7 @@ class LoginWizard implements Component {
       `- \`apiKey\` = \`${llm.apiKey ? maskSecret(llm.apiKey) : "（未设置）"}\``,
       `- \`model\` = \`${llm.model ?? "（未设置）"}\``,
       `- \`thinkingFormat\` = \`${llm.thinkingFormat ?? "auto（自动识别）"}\``,
+      `- \`contextWindow\` = \`${llm.contextWindow ?? "默认 128000"}\`，\`maxTokens\` = \`${llm.maxTokens ?? "默认 8192"}\`（Build 批次预算与 API max_tokens）`,
       reloadNote,
     ].join("\n");
     this.onSaved(summary);

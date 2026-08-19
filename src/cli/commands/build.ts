@@ -23,14 +23,15 @@ export async function cmdBuild(
     const force = flags["--force"] === true || flags["--force"] === "true";
     // 串行执行：批间存在实体/摘要依赖，--parallel 不再生效（pipeline 会忽略并警告）
     const concurrency = parseNum(flags["--parallel"]) ?? 1;
-    // 默认逐章抽取（进度按章、依赖最严格）；--auto-batch 或 --batch-size N 合并多个章节
+    // 默认自适应合并（按模型上下文预算自动合并章节，长书省一半以上调用）；
+    // --batch-size N 回退固定批（每批 N 章）；--no-auto-batch 不存在——显式逐章用 --batch-size 1
     const autoBatch = flags["--auto-batch"] === true || flags["--auto-batch"] === "true"
       ? true
-      : (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? false));
-    if (!autoBatch) {
-      log(`逐章抽取模式：每批 1 章（进度按章显示，前后依赖最严格）`);
+      : (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? true));
+    if (autoBatch) {
+      log(`自适应合并抽取（默认）：按模型上下文预算自动合并章节（单批上限受输出预算约束）`);
     } else {
-      log(`合并抽取模式已开启：--batch-size ${batchSize} 或按模型上下文自适应合并`);
+      log(`固定批模式：每批 ${batchSize} 章（--batch-size N，依赖最严格）`);
     }
     // 失败即停（默认）：依赖链断裂后不再继续，否则后续实体悬空；--keep-going 显式继续
     const failFast = !(flags["--keep-going"] === true || flags["--keep-going"] === "true");

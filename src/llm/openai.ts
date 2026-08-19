@@ -51,6 +51,15 @@ function deepseekCompat(modelName: string, thinkingFormat: string): Record<strin
   return {};
 }
 
+/** 内置模型规格（对齐 deepseek-harness llm-deepseek 适配 + pi-ai 官方注册表）：
+ *  模型名 → 上下文/最大输出。未收录的模型回落 config / 环境变量 / 默认（128k / 8192）。
+ *  v4 系列：contextWindow=1M（1_000_000 tokens）、maxTokens 保守默认 256K（harness DEFAULT_MAX_TOKENS=256e3；
+ *  pi-ai 注册表标 384K 为上限，这里取 harness 的保守默认，避免撑爆服务端）。 */
+const MODEL_SPECS: Record<string, { contextWindow?: number; maxTokens?: number }> = {
+  "deepseek-v4-flash": { contextWindow: 1000000, maxTokens: 256000 },
+  "deepseek-v4-pro": { contextWindow: 1000000, maxTokens: 256000 },
+};
+
 export class PiAiProvider implements LlmProvider {
   readonly name = "openai";
   readonly modelName: string;
@@ -62,8 +71,10 @@ export class PiAiProvider implements LlmProvider {
   constructor(opts: PiAiOptions) {
     this.opts = opts;
     this.modelName = opts.model;
-    this.contextWindow = opts.contextWindow ?? envInt("LLM_CONTEXT_WINDOW", 128000);
-    this.maxTokens = opts.maxTokens ?? envInt("LLM_MAX_TOKENS", 8192);
+    // 优先级：环境变量 > config（llm.contextWindow/maxTokens）> 按模型名内置规格（对齐 pi-ai 注册表）> 默认
+    const spec = MODEL_SPECS[opts.model] ?? {};
+    this.contextWindow = envInt("LLM_CONTEXT_WINDOW", opts.contextWindow ?? spec.contextWindow ?? 128000);
+    this.maxTokens = envInt("LLM_MAX_TOKENS", opts.maxTokens ?? spec.maxTokens ?? 8192);
   }
 
   /** 推理协议配置：环境变量 LLM_THINKING_FORMAT 优先，其次 config.llm.thinkingFormat，默认 auto */

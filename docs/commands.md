@@ -73,10 +73,14 @@ cmdBuild
  └─ runBuild(repo, provider, opts)            # build/pipeline.ts
      ├─ 1. 计算范围：from/to = clamp(1..dbMax)；dbMax = availableThrough
      ├─ 2. 生成批次：
-     │     · 固定模式（--batch-size / config.build.batchSize）：每批 N 章
-     │     · 自适应模式（autoBatch）：按上下文预算动态合并
+     │     · 自适应模式 autoBatch（**默认**，config.build.autoBatch=true）：按上下文预算动态合并
      │         inputBudget = (contextWindow − maxTokens) × 0.9 − 固定开销(3000)
      │         单批上限 min(maxBatchChapters, 输出预算折算的章数)
+     │         · contextWindow/maxTokens 来源：config.llm.{contextWindow,maxTokens} > 环境变量
+     │           LLM_CONTEXT_WINDOW/LLM_MAX_TOKENS > 按模型名内置规格（deepseek-v4-flash/pro = 1M 上下文/256K 输出，
+     │           对齐 deepseek-harness llm-deepseek 的 1_000_000/256e3 默认）> provider.getCapabilities() > 默认（128k / 8192）；
+     │           maxTokens 同时会作为 API max_tokens 发送
+     │     · 固定模式（--batch-size N / config.build.batchSize）：每批 N 章（--batch-size 1 = 逐章，依赖最严格）
      ├─ 3. 断点续跑：跳过 status=done 的批次（batch_state）+ 按"每章都被 done 覆盖"判断
      │         （--force 忽略；failed 批次不会被跳过，下次 build 自动重试）
      ├─ 4. 逐批串行 processBatch：
@@ -126,6 +130,7 @@ repo.db.exec("COMMIT")   # 任一步异常 → ROLLBACK，批次记 failed
 ### 修复机制（设计原则：数据修正权在 LLM，代码不静默改写）
 - 校验失败 → `buildValidationFeedback(raw, error)` **点名**非法条目（如"请从 newEntities 中删除：杀戮舞曲"）→ 作为 `input.feedback` 传入下一次抽取；
 - 下次 prompt 经 `buildFixInstruction(feedback)`（`build/prompts.ts`）注入"校验器原文 + 定向提示"；
+- **JSON 解析失败 / 输出截断也回填 feedback**（`pipeline.ts`）：模型输出无法解析（常见：混入解释文字、代码块围栏、**中文全角逗号/冒号当结构标点**）或达到输出上限被截断（模型"思考叙述"吃预算）时，`buildFixInstruction` 给出对应定向提示（禁前言文字 / 半角标点 / 精简输出），让重试真正会修。
 - **代码绝不静默改写/丢弃模型输出**（这是与"宽容修复"方案明确区分的设计决定）；若重试耗尽仍失败 → 批次响亮失败并记录原因。
 - 校验硬规则示例：`newEntities.type` 只允许 `character|organization|location|item|concept`，能力/技能禁止作为实体类型（能力走 `abilities` 数组）。
 
@@ -231,7 +236,7 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 - 每次改动立即 `saveConfig` 写 `.story/config.json`；`userChapter` 即时生效（`repo.setUserChapter` + 工具上下文 + `agent.reset()` 清历史防泄露）。
 
 ### `/login` — 引导式 LLM 连接向导
-- `openLoginView(tui, deps)` 把输入区替换为自定义 `LoginWizard` 面板，分步：`baseUrl` → `apiKey` → `model` → `thinkingFormat` → **测试连接** → **保存并完成**；Esc 返回。`thinkingFormat` 用 Enter 循环切换 `auto|deepseek|zai|qwen|openrouter|openai`（glm 系选 `zai`、deepseek 系选 `deepseek`；`auto` 自动识别）。
+- `openLoginView(tui, deps)` 把输入区替换为自定义 `LoginWizard` 面板，分步：`baseUrl` → `apiKey` → `model` → `thinkingFormat` → `contextWindow` → `maxTokens` → **测试连接** → **保存并完成**；Esc 返回。`thinkingFormat` 用 Enter 循环切换 `auto|deepseek|zai|qwen|openrouter|openai`（glm 系选 `zai`、deepseek 系选 `deepseek`；`auto` 自动识别）；`contextWindow`/`maxTokens` 正整数才写入 config（留空回落环境变量/默认），作为 Build 批次预算与 API `max_tokens`（大上下文模型按实际填，如 1048576/384000）。
 - 测试连接：用当前输入合并出临时 config → `createProvider(cfg)` → `provider.complete([…], { stream:false, reasoning:"off" })`，成功显示模型名与回复、失败显示错误；连接信息不完整则提示将用 mock。
 - 保存：写入 `cfg.llm.{baseUrl,apiKey,model,thinkingFormat}` 并 `saveConfig`；留空项删除（回退环境变量）；保存后调用 `onLlmChanged`（app.ts 的 `reloadLlm`）**重建 provider/agent 并实时换入，无需重启**；完成后摘要经 `onNotify` 渲染到聊天区。
 - 语义：环境变量 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL` 始终优先于 config（`resolveLlmSettings`），`/login` 只是把连接写进 config。

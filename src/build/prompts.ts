@@ -37,7 +37,10 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
      若某个能力名确实需要被其他实体引用，最多以 type="concept" 建实体，优先不建。
 
 ## 输出格式
-只输出一个 JSON 对象，不要输出任何其他文字。格式：
+只输出一个 JSON 对象，不要输出任何其他文字：
+- 【硬性】禁止任何解释/思考/检索过程描述（中文的「让我…」「检索结果显示…」，英文的 Let me / Actually / The tool returned 等一律不行），不要用 markdown 代码块围栏（fence）。
+- 【硬性】JSON 的结构标点必须用半角英文（逗号 , 、冒号 : 、花括号 { } 、方括号 [ ] 、引号 "）；字符串值内部可以用中文标点，但**不要把中文标点（，：）用在结构分隔上**。
+- 直接以 { 开头、以 } 结尾。格式：
 {
   "newEntities": [{ "name": "...", "type": "character|organization|location|item|concept", "firstSeenChapter": 1 }],
   "aliases": [{ "entityName": "...", "alias": "...", "fromChapter": 1 }],
@@ -67,7 +70,11 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
 export function buildFixInstruction(feedback: string): string {
   const hint = feedback.includes("newEntities.type 非法")
     ? "\n- 能力/技能/招式/功法【永远】不允许出现在 newEntities 里（不存在 \"ability\" 这个实体类型）。请【删除】这些条目，不要保留、不要改写类型；能力只属于 abilities 数组（已在里面就保持原样，不要再建实体）。newEntities.type 只允许 character|organization|location|item|concept。"
-    : "";
+    : feedback.includes("被截断")
+      ? "\n- 上次输出超过长度上限被截断。请【大幅精简】：只输出 JSON 对象本身，禁止任何解释/思考/检索过程描述（中英文都不行），summary/value/detail 用最简表达，不重复已知信息。"
+      : feedback.includes("无法解析为 JSON")
+        ? "\n- 上次输出不是合法 JSON。常见原因：① JSON 前后混入了解释文字或代码块围栏；② 字段分隔符/冒号用了中文全角标点（，：）。请只输出一个 JSON 对象：结构标点一律用半角（, : { } [ ] \"），字符串值内部可用中文标点；不要在 JSON 外输出任何文字。"
+        : "";
   return `## 上一次输出未通过校验（请修复后重新输出）
 校验器报告：
 > ${feedback}

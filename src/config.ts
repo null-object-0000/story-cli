@@ -19,6 +19,10 @@ export interface StoryConfig {
     /** 结构化抽取时的思考强度：off 最快最省（默认）| low | medium | high
      *  （Ask 对话不受影响，保留模型自身推理能力） */
     extractReasoning?: "off" | "low" | "medium" | "high";
+    /** 模型上下文窗口（tokens）：Build 批次预算用；环境变量 LLM_CONTEXT_WINDOW 优先，默认 128000 */
+    contextWindow?: number;
+    /** 模型单次最大输出（tokens）：会作为 API max_tokens 发送；环境变量 LLM_MAX_TOKENS 优先，默认 8192 */
+    maxTokens?: number;
   };
   build?: {
     batchSize: number;      // 固定批大小（autoBatch=false 时使用）
@@ -61,7 +65,7 @@ export const DEFAULT_CONFIG: StoryConfig = {
   // book 不预设具体小说：未 import 前为空（顶部/提示用「未导入」兜底），import 时按文件名/--book 确定
   book: "",
   userChapter: 1,
-  build: { batchSize: 1, retries: 2, autoBatch: false, perChapterOutputTokens: 260, maxBatchChapters: 60 },
+  build: { batchSize: 1, retries: 2, autoBatch: true, perChapterOutputTokens: 260, maxBatchChapters: 60 },
 };
 
 /** 项目根：V0.1 使用当前工作目录下的 .story */
@@ -106,7 +110,7 @@ export function initProject(opts: { book?: string; userChapter?: number } = {}, 
     build: {
       batchSize: DEFAULT_CONFIG.build?.batchSize ?? 1,
       retries: DEFAULT_CONFIG.build?.retries ?? 2,
-      autoBatch: DEFAULT_CONFIG.build?.autoBatch ?? false,
+      autoBatch: DEFAULT_CONFIG.build?.autoBatch ?? true,
       perChapterOutputTokens: DEFAULT_CONFIG.build?.perChapterOutputTokens ?? 260,
       maxBatchChapters: DEFAULT_CONFIG.build?.maxBatchChapters ?? 60,
     },

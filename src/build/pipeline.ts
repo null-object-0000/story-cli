@@ -379,8 +379,11 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       } catch (e) {
         lastError = e instanceof Error ? e.message : String(e);
         // 仅校验错误携带"修复反馈"重试（网络/超时等重试不需要修复提示，也避免把非校验错误误当提示）。
-        // 反馈会点名具体非法条目（如"删除 newEntities 中的 杀戮舞曲"），比泛化提示更可执行。
-        feedback = e instanceof ValidationError ? buildValidationFeedback(rawOutput, lastError) : "";
+        // 反馈会点名具体非法条目（如"删除 newEntities 中的 杀戮舞曲"）；JSON 解析失败/截断同样回填，
+        // 让 buildFixInstruction 给出针对性提示（禁前言文字/半角标点/精简输出）。
+        feedback = e instanceof ValidationError
+          ? buildValidationFeedback(rawOutput, lastError)
+          : (lastError.includes("无法解析为 JSON") || lastError.includes("被截断") ? lastError : "");
         if (attempt >= retries) break;
       }
     }

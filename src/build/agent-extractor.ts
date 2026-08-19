@@ -56,7 +56,9 @@ export async function agentExtract(
 3. 【实体引用契约】命中已有实体后，最终 JSON 必须使用工具返回的 canonical name 作为 entityName/fromName/toName，
    不要使用当前文本中的别名再次创建实体（工具已通过别名定位到该实体）。
 4. 未命中检索的旧名字、以及真正第一次登场的新名字，一律作为新实体处理（newEntities 用 name 给出）。
-5. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，不要输出其他任何文字。`;
+5. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，
+   不要输出任何其他文字——禁止解释/思考/检索过程描述（中英文都不行），不要用 markdown 代码块围栏，
+   结构标点必须用半角（, : { } [ ] "），避免中文全角标点（，：）。`;
 
   // 章节文本（与 Ask 不同：build 阶段可读取原文）
   const chapters = input.texts
@@ -136,6 +138,7 @@ ${chapters}
   let turnCount = 0;
   let toolStartAt = 0;
   let toolCalls = 0;
+  let lastStopReason = "";
   agent.subscribe((event: any) => {
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       finalText += event.assistantMessageEvent.delta ?? "";
@@ -177,6 +180,7 @@ ${chapters}
     }
     if (event.type === "message_end" && event.message) {
       const msg = event.message as any;
+      lastStopReason = msg.stopReason ?? lastStopReason;
       const u = msg.usage;
       const turnInput = (u?.input ?? 0) + (u?.cacheRead ?? 0) + (u?.cacheWrite ?? 0);
       const turnOutput = (u?.output ?? 0) + (u?.reasoning ?? 0);
@@ -213,6 +217,10 @@ ${chapters}
 
     const json = extractJson(finalText);
     if (json === null) {
+      // 区分"截断"与"格式错误"：让 pipeline 的反馈机制能给出针对性修复提示（见 prompts.buildFixInstruction）
+      if (lastStopReason === "length") {
+        throw new Error("Agent 输出被截断（达到输出上限，JSON 不完整）");
+      }
       throw new Error("Agent 输出无法解析为 JSON");
     }
     if (toolCalls > 0) {

@@ -332,7 +332,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
               ? flags["--batch-size"] as number
               : (cfg.build?.batchSize ?? undefined),
             concurrency: 1,
-            autoBatch: flags["--auto-batch"] === true || (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? false)),
+            autoBatch: flags["--auto-batch"] === true || (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? true)),
             failFast: !(flags["--keep-going"] === true),
             sessionLog: cfg.build?.sessionLog ?? true,
             maxBatchChapters: cfg.build?.maxBatchChapters,
