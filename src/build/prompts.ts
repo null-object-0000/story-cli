@@ -92,23 +92,49 @@ MemoryAnchor **不是**"重要剧情摘要 / 高重要度事件"。它的准确�
 MemoryAnchor 的 summary 要**保留用户可能用来回忆的原话感**：具体、有画面、含可检索的动词与名词（拉车/板车/做饭/沉默/板着脸/教念…），
 不要抽象成"他是三师兄，身份重要"这种无法被"拉车/做饭/沉默"定位的概括。
 
+## Reveal Chapter / Evidence Grounding（硬性，防 Temporal Attribution Error）
+所有带 chapter / fromChapter / firstSeenChapter 的 temporal 记录，其章节号表示：
+> **读者最早从哪一章可以获得这条知识（Reveal Chapter）**——不是凭印象填写的"大概在哪章"。
+
+**每条 temporal 记录必须同时给出 "evidence"**：来自该章原文的**短引用**（≤ 25 字），程序会做确定性校验：
+> evidence 必须真实存在于 record.chapter 对应的章节原文（normalize 空白/标点后 substring 匹配）。
+> 校验不通过 → 整批重试，反馈会点名错误，请据此修正 chapter 或 evidence。
+
+填写规则（不能凭印象）：
+1. **evidence 必须来自原文**：短 quote 即可（如「正在拉车的，是老三闻人佑」「平日里都是老三做饭」），
+   不要整段复制、不要自己总结成另一句话、不要编造。
+2. **chapter 必须与 evidence 同章**：evidence 出自第几章，chapter 就填第几章。
+3. **chapter 应填"当前输入中最早明确支持该知识"的 Reveal Chapter**：即使后面章节再次提到，也不要写后面的章节。
+4. **不要混淆"实体首次出现"与"知识揭晓"**：例如人物第362章以「三师兄」出现、第392章才揭晓姓名「闻人佑」——
+   firstSeenChapter 可以较早，但 canonical name 相关知识的 reveal 不得早于 392（届时才出现在原文）。
+5. **evidence 直接从你已读到的章节原文引用即可，不要逐条调用 search_chapter_evidence**：
+   「待抽取章节」全文都在你的输入里，你只需把某条知识对应章节里的原句摘出来作为 evidence。
+   只有当你确实记不清某句话出自哪一章、或需要确认"最早"支持章节时，才调用 search_chapter_evidence 检索一次。
+   对每条 fact/relation/anchor 都去调用工具会非常浪费——直接引用即可。
+
 ## 输出格式
 只输出一个 JSON 对象，不要输出任何其他文字：
 - 【硬性】禁止任何解释/思考/检索过程描述（中文的「让我…」「检索结果显示…」，英文的 Let me / Actually / The tool returned 等一律不行），不要用 markdown 代码块围栏（fence）。
 - 【硬性】JSON 的结构标点必须用半角英文（逗号 , 、冒号 : 、花括号 { } 、方括号 [ ] 、引号 "）；字符串值内部可以用中文标点，但**不要把中文标点（，：）用在结构分隔上**。
 - 直接以 { 开头、以 } 结尾。格式：
 {
-  "newEntities": [{ "name": "...", "type": "character|organization|location|item|concept", "firstSeenChapter": 1 }],
-  "aliases": [{ "entityName": "...", "alias": "...", "fromChapter": 1 }],
-  "facts": [{ "entityName": "...", "type": "role|identity|personality|affiliation|status|occupation|appearance|ability|habit|description|other", "value": "...", "chapter": 1, "confidence": 0.9 }],
-  "relations": [{ "fromName": "...", "toName": "...", "type": "...", "detail": "...", "chapter": 1, "confidence": 0.9 }],
-  "abilities": [{ "entityName": "...", "name": "...", "category": "ability", "system": "...", "path": "...", "level": "...", "sourceEntity": "...", "acquiredChapter": 1, "summary": "...", "chapter": 1 }],
-  "events": [{ "chapter": 1, "participantNames": ["..."], "type": "...", "summary": "...", "importance": 0.5 }],
-  "memoryAnchors": [{ "entityName": "...", "chapter": 1, "kind": "visual|behavior|habit|interaction|role|quote", "summary": "...", "importance": 0.6, "memorability": 0.9, "protagonistRelevance": 0.5 }],
+  "newEntities": [{ "name": "...", "type": "character|organization|location|item|concept", "firstSeenChapter": 1, "evidence": "首次出现的原文短引" }],
+  "aliases": [{ "entityName": "...", "alias": "...", "fromChapter": 1, "evidence": "该称呼出现在本章的原文短引" }],
+  "facts": [{ "entityName": "...", "type": "role|identity|personality|affiliation|status|occupation|appearance|ability|habit|description|other", "value": "...", "chapter": 1, "confidence": 0.9, "evidence": "本章原文短引" }],
+  "relations": [{ "fromName": "...", "toName": "...", "type": "...", "detail": "...", "chapter": 1, "confidence": 0.9, "evidence": "本章原文短引" }],
+  "abilities": [{ "entityName": "...", "name": "...", "category": "ability", "system": "...", "path": "...", "level": "...", "sourceEntity": "...", "acquiredChapter": 1, "summary": "...", "chapter": 1, "evidence": "读者在本章得知该能力的原文短引" }],
+  "events": [{ "chapter": 1, "participantNames": ["..."], "type": "...", "summary": "...", "importance": 0.5, "evidence": "本章原文短引" }],
+  "memoryAnchors": [{ "entityName": "...", "chapter": 1, "kind": "visual|behavior|habit|interaction|role|quote", "summary": "...", "importance": 0.6, "memorability": 0.9, "protagonistRelevance": 0.5, "evidence": "本章原文短引" }],
   "possibleDuplicates": [{ "entityA": "...", "entityB": "...", "reason": "..." }],
   "conflicts": [{ "kind": "fact_conflict", "entityName": "...", "detail": "...", "chapterA": 1, "chapterB": 2 }],
   "batchSummary": "2~3句话概括本批章节的剧情进展，供下一批抽取参考。"
 }
+
+evidence 要求（所有 temporal 记录：newEntities/aliases/facts/relations/abilities/events/memoryAnchors）：
+- 必须来自 record.chapter 对应章节的原文，短引用（≤ 25 字）；程序会校验 evidence 是否存在该章原文。
+- 不要整段复制、不要总结成另一句、不要编造。aliases/facts/relations/abilities/memoryAnchors 的 evidence 为**必填**；
+  events/newEntities 的 evidence 若给出也会被校验（建议尽量给）。
+- abilities 的 acquiredChapter 是"故事内获得时间"，不要求原文在当章直接出现，无需为其提供 evidence；只有 abilities.chapter（Reveal Chapter）需要。
 
 memoryAnchors 的 kind（记忆线索类型，轻量枚举，从下面选一个）：
 - visual      外貌 / 视觉画面
@@ -125,6 +151,8 @@ memoryAnchors 的 kind（记忆线索类型，轻量枚举，从下面选一个�
    - confidence（省略默认 0.8）、importance（省略默认 0.5）、memorability（省略默认 0.7）、protagonistRelevance（省略默认 0.5）
    - 只在明显偏离默认时才显式给出，其余一律省略。
    - **kind 不要省略**：每条 MemoryAnchor 都应给出 kind（这决定了它在召回时如何被解读）。
+   - **evidence 不要省略**：aliases/facts/relations/abilities/memoryAnchors 的 evidence 是必填（校验不过会整批重试）；
+     它是原文短引（≤ 25 字），不是额外负担——照抄原文关键词句即可。
 3. 数量上限（按本批章节总量控制）：每章 facts ≤ 5 条（同维度事实合并成一条）、events ≤ 3 个、memoryAnchors ≤ 3 条（**角色有高识别度线索时必须达到，没有则 0~1 条，不要硬凑**）；aliases 只收真正新增且对记忆恢复有用的称呼，杜绝罗列。
 4. 已存在实体（通过工具检索命中的）：只输出【本批新增或变化】的信息——新别名、新关系、能力变化、新经历、身份变化；【绝不重复】其身份、性格、背景等已有内容。
    - **例外（稀疏实体补充）**：工具返回会带该实体的 "facts"/"anchors" 数量。若某个已存在实体 "facts"/"anchors" 很少
@@ -139,11 +167,15 @@ memoryAnchors 的 kind（记忆线索类型，轻量枚举，从下面选一个�
 export function buildFixInstruction(feedback: string): string {
   const hint = feedback.includes("newEntities.type 非法")
     ? "\n- 能力/技能/招式/功法【永远】不允许出现在 newEntities 里（不存在 \"ability\" 这个实体类型）。请【删除】这些条目，不要保留、不要改写类型；能力只属于 abilities 数组（已在里面就保持原样，不要再建实体）。newEntities.type 只允许 character|organization|location|item|concept。"
-    : feedback.includes("被截断")
-      ? "\n- 上次输出超过长度上限被截断。请【大幅精简】：只输出 JSON 对象本身，禁止任何解释/思考/检索过程描述（中英文都不行），summary/value/detail 用最简表达，不重复已知信息。"
-      : feedback.includes("无法解析为 JSON")
-        ? "\n- 上次输出不是合法 JSON。常见原因：① JSON 前后混入了解释文字或代码块围栏；② 字段分隔符/冒号用了中文全角标点（，：）。请只输出一个 JSON 对象：结构标点一律用半角（, : { } [ ] \"），字符串值内部可用中文标点；不要在 JSON 外输出任何文字。"
-        : "";
+    : feedback.includes("缺少 evidence")
+      ? "\n- 校验器要求每条 temporal 记录（aliases/facts/relations/abilities/memoryAnchors）都必须提供 evidence：来自该章原文的短引用（≤ 25 字）。请给被点名的条目补上 evidence，并把 chapter 设为该 evidence 真正出现的章节。"
+      : feedback.includes("原文中不存在")
+        ? "\n- 被点名的 evidence 在你声明的 chapter 原文里找不到。原因通常是：① evidence 是总结/改写而非原文原句；② 用省略号把不相邻的句子拼接；③ 章节号填错。请改为【逐字照抄】该章原文的一句话（不要总结、不要用省略号拼接、不要改写），并确认 chapter 就是这句话所在章节；可调用 search_chapter_evidence 检索确认。"
+        : feedback.includes("被截断")
+          ? "\n- 上次输出超过长度上限被截断。请【大幅精简】：只输出 JSON 对象本身，禁止任何解释/思考/检索过程描述（中英文都不行），summary/value/detail 用最简表达，不重复已知信息。"
+          : feedback.includes("无法解析为 JSON")
+            ? "\n- 上次输出不是合法 JSON。常见原因：① JSON 前后混入了解释文字或代码块围栏；② 字段分隔符/冒号用了中文全角标点（，：）。请只输出一个 JSON 对象：结构标点一律用半角（, : { } [ ] \"），字符串值内部可用中文标点；不要在 JSON 外输出任何文字。"
+            : "";
   return `## 上一次输出未通过校验（请修复后重新输出）
 校验器报告：
 > ${feedback}

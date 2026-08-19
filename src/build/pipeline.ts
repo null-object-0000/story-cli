@@ -257,6 +257,9 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       attempts: number;
       summary: string | null;
       sessionLog: string | null;
+      /** Evidence Grounding：本批带 evidence 的 temporal 记录数 / 非致命 warning 数（可观测性，不存原文） */
+      evidenceValidated?: number;
+      evidenceWarnings?: number;
     }): void => {
       mainline.write({
         kind: "batch", runId,
@@ -275,6 +278,8 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         summary: info.summary,
         error: br.error ?? null,
         sessionLog: info.sessionLog,
+        evidenceValidated: info.evidenceValidated ?? null,
+        evidenceWarnings: info.evidenceWarnings ?? null,
       });
       runTokens.input += info.usage.input;
       runTokens.cached += info.usage.cached;
@@ -358,7 +363,10 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         rawOutput = res.output;
         // 设计原则：校验错误不在这里"悄悄修数据"，而是由反馈循环回传给 LLM，
         // 让模型自己修正输出（见下方 catch 里的 feedback 回填 + prompts.buildFixInstruction）。
-        bundle = validateExtractionOutput(res.output, r.start, r.end);
+        // 章节原文 map：Evidence Grounding 校验（chapter+evidence 必须在对应章节原文中确定性验证）。
+        const chapterTexts = new Map<number, string>();
+        for (const t of texts) chapterTexts.set(t.chapter, t.text);
+        bundle = validateExtractionOutput(res.output, r.start, r.end, chapterTexts);
         // 校验通过：记录结构化产出统计（准确度分析用）
         batchSessionLog?.write({
           t: "validated", range: key,
@@ -373,8 +381,12 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
             memoryAnchors: bundle.memoryAnchors.length,
             possibleDuplicates: bundle.possibleDuplicates.length,
           },
+          evidenceWarnings: bundle.warnings,
           batchSummary: bundle.batchSummary,
         });
+        for (const w of bundle.warnings) {
+          warn(`  [${key}] 证据提示（非失败）：${w}`);
+        }
         break;
       } catch (e) {
         lastError = e instanceof Error ? e.message : String(e);
@@ -508,7 +520,19 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     const br: BatchResult = { range: key, status: "done", ...counts, entityUpdates };
     processed.push(br);
     running.splice(running.indexOf(key), 1);
-    writeIndex(br, { usage: { input: usage.inputTokens, cached: usage.cachedTokens, output: usage.outputTokens }, chars: batchChars, durationMs, attempts: attempt + 1, summary: bundle.batchSummary ?? null, sessionLog: batchSessionLog?.path ?? null });
+    // Evidence Grounding 可观测性：统计本批带 evidence 的 temporal 记录数与非致命 warning 数（不存原文）
+    const evidenceValidated =
+      bundle.facts.length + bundle.relations.length + bundle.memoryAnchors.length + bundle.aliases.length + bundle.abilities.length +
+      bundle.events.filter((e) => e.evidence).length +
+      bundle.newEntities.filter((e) => e.evidence).length;
+    writeIndex(br, {
+      usage: { input: usage.inputTokens, cached: usage.cachedTokens, output: usage.outputTokens },
+      chars: batchChars, durationMs, attempts: attempt + 1,
+      summary: bundle.batchSummary ?? null,
+      sessionLog: batchSessionLog?.path ?? null,
+      evidenceValidated,
+      evidenceWarnings: bundle.warnings.length,
+    });
     emitProgress(key, "done", br);
   }
 

@@ -10,7 +10,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { StoryRepo } from "../src/db/repo.js";
-import { validateExtractionOutput, ValidationError, MEMORY_ANCHOR_KINDS } from "../src/build/validation.js";
+import { validateExtractionOutput, ValidationError, MEMORY_ANCHOR_KINDS, normalizeEvidenceText, evidenceInChapter } from "../src/build/validation.js";
 import { searchEntities } from "../src/reader/search.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -146,6 +146,127 @@ function main(): number {
     }
     assert(rejected, "kind=junk 必须校验失败");
     assert(MEMORY_ANCHOR_KINDS.size === 6, "kind 枚举应为 6 种");
+  });
+
+  // ---- Evidence Grounding / Provenance：chapter+evidence 必须在对应章节原文中确定性验证 ----
+  const ch10 = new Map<number, string>([
+    [10, "今天天气不错，没有别的消息。"],
+    [11, "张三每天都戴着一条红围巾。"],
+  ]);
+  const evBase = { newEntities: [], aliases: [], facts: [], relations: [], abilities: [], events: [], memoryAnchors: [], possibleDuplicates: [], conflicts: [], batchSummary: null };
+
+  test("Evidence：正确 chapter + evidence → PASS", () => {
+    const ok = validateExtractionOutput(
+      { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "每天都戴红围巾", chapter: 11, confidence: 0.9, evidence: "张三每天都戴着一条红围巾" }] },
+      1, 20, ch10
+    );
+    assert(ok.facts.length === 1, "正确 evidence 应通过");
+    assert(ok.facts[0].evidence === "张三每天都戴着一条红围巾", "evidence 应保留");
+  });
+
+  test("Evidence：错误 chapter（evidence 在 11 章，声明 10 章）→ FAIL", () => {
+    let rejected = false;
+    try {
+      validateExtractionOutput(
+        { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "每天都戴红围巾", chapter: 10, confidence: 0.9, evidence: "张三每天都戴着一条红围巾" }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError && /第10章原文中不存在/.test((e as Error).message);
+    }
+    assert(rejected, "evidence 不在声明章节 → 必须失败并点名章节");
+  });
+
+  test("Evidence：换行/标点 normalize 后应 PASS", () => {
+    const ch = new Map([[10, "“张三，\n每天都戴着一条红围巾。”"]]);
+    assert(normalizeEvidenceText("“张三，\n每天都戴着一条红围巾。”") === "张三每天都戴着一条红围巾", "normalize 应去标点/空白/引号/换行");
+    assert(evidenceInChapter("张三，每天都戴着一条红围巾", "“张三，\n每天都戴着一条红围巾。”"), "evidenceInChapter 应返回 true");
+    const ok = validateExtractionOutput(
+      { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "戴红围巾", chapter: 10, confidence: 0.9, evidence: "张三，每天都戴着一条红围巾" }] },
+      1, 20, ch
+    );
+    assert(ok.facts.length === 1, "normalize 后 evidence 应通过");
+  });
+
+  test("Evidence：编造 evidence → FAIL", () => {
+    let rejected = false;
+    try {
+      validateExtractionOutput(
+        { ...evBase, facts: [{ entityName: "张三", type: "identity", value: "村里最强", chapter: 11, confidence: 0.9, evidence: "张三是村里最厉害的人" }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError && /原文中不存在/.test((e as Error).message);
+    }
+    assert(rejected, "编造 evidence 必须失败");
+  });
+
+  test("Evidence：必填类型缺 evidence → FAIL", () => {
+    let rejected = false;
+    try {
+      validateExtractionOutput(
+        { ...evBase, facts: [{ entityName: "张三", type: "habit", value: "戴红围巾", chapter: 11, confidence: 0.9 }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError && /缺少 evidence/.test((e as Error).message);
+    }
+    assert(rejected, "必填类型缺 evidence 必须失败");
+  });
+
+  test("Evidence：MemoryAnchor 错误 chapter 被拦截", () => {
+    let rejected = false;
+    try {
+      validateExtractionOutput(
+        { ...evBase, memoryAnchors: [{ entityName: "张三", chapter: 10, kind: "habit", summary: "戴红围巾", evidence: "张三每天都戴着一条红围巾" }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError && /记忆锚点.*原文中不存在/.test((e as Error).message);
+    }
+    assert(rejected, "MemoryAnchor 错误 chapter 必须失败");
+  });
+
+  test("Evidence：Relation 错误 chapter 被拦截", () => {
+    let rejected = false;
+    try {
+      validateExtractionOutput(
+        { ...evBase, relations: [{ fromName: "张三", toName: "李四", type: "同乡", chapter: 10, confidence: 0.9, evidence: "张三每天都戴着一条红围巾" }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError && /关系.*原文中不存在/.test((e as Error).message);
+    }
+    assert(rejected, "Relation 错误 chapter 必须失败");
+  });
+
+  test("Evidence：Ability.chapter 需验证，acquiredChapter 不要求", () => {
+    // acquiredChapter 是 Story Time（可能描述历史获得时间），不要求原文在当章直接出现、无需 evidence；
+    // ability.chapter 是 Reveal Chapter，需要 evidence。
+    const ok = validateExtractionOutput(
+      { ...evBase, abilities: [{ entityName: "张三", name: "红围巾术", acquiredChapter: 3, chapter: 11, evidence: "张三每天都戴着一条红围巾" }] },
+      1, 20, ch10
+    );
+    assert(ok.abilities.length === 1, "acquiredChapter=3（过去）无需 evidence，chapter=11 有 evidence 应通过");
+    let rejected = false;
+    try {
+      validateExtractionOutput(
+        { ...evBase, abilities: [{ entityName: "张三", name: "红围巾术", chapter: 10, evidence: "张三每天都戴着一条红围巾" }] },
+        1, 20, ch10
+      );
+    } catch (e) {
+      rejected = e instanceof ValidationError && /能力.*原文中不存在/.test((e as Error).message);
+    }
+    assert(rejected, "Ability.chapter 错误 evidence 必须失败");
+  });
+
+  test("Evidence：最早证据 soft warning（evidence 在更早章节也出现）", () => {
+    const ch = new Map([[10, "老三会做饭。"], [11, "老三会做饭。"]]);
+    const ok = validateExtractionOutput(
+      { ...evBase, memoryAnchors: [{ entityName: "老三", chapter: 11, kind: "role", summary: "负责做饭", evidence: "老三会做饭" }] },
+      1, 20, ch
+    );
+    assert(ok.warnings.length >= 1 && /第10章也出现/.test(ok.warnings[0]), "evidence 在更早章节出现应产生 warning（不失败）");
   });
 
   // ---- MemoryAnchor kind 持久化 + userChapter 可见性过滤 ----

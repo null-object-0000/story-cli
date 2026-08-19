@@ -109,13 +109,15 @@ cmdBuild
 ### Agent 化抽取机制（`build/agent-extractor.ts` → `agentExtract`）
 Build 只走 Agent 化抽取（注入式已移除）。与 Ask 的 Reader Agent 不同，**抽取 Agent 读原文**、只产出结构化数据：
 
-- 用 pi-agent-core `Agent` 跑完整循环（含工具调用），系统提示词 = `build/prompts.ts` 的 `EXTRACTION_SYSTEM_PROMPT`（角色定义、抽取原则、实体引用契约、Batch Range、输出 JSON 格式、token 精简要求）+ 一段"Agent 工作流程"附录（通读章节 → 批量检索旧实体 → 按 canonical name 引用 → 输出唯一 JSON）。
-- **只给 1 个工具**：`search_existing_entities`（`agent-extractor.ts` 内联定义）——批量检索知识库已有实体，一次可传 ≤40 个名字，返回命中实体的 `id/name/type/别名` + **`facts`/`anchors` 数量**（≤100 条；数据密度让模型判断稀疏实体是否该补充 MemoryAnchor）。目的：让模型复用已建实体，避免重复建实体；返回的 `name` 是 canonical name，最终 JSON 引用时必须用它（不能用文本里的别名再建实体）。
-- **无工具调用上限**：单批内模型可自由调 `search_existing_entities`（每次 ≤40 个名字），靠上下文窗口自然收敛；超长循环由 build session-log 观测（`.story/logs/build/`）。
-- 模型最终输出必须是一个 JSON 对象（9 个数组：`newEntities / aliases / facts / relations / abilities / events / memoryAnchors / possibleDuplicates / conflicts` + `batchSummary`）。输出无法解析为 JSON → 抛错交 pipeline 重试。
+- 用 pi-agent-core `Agent` 跑完整循环（含工具调用），系统提示词 = `build/prompts.ts` 的 `EXTRACTION_SYSTEM_PROMPT`（角色定义、抽取原则、实体引用契约、**Reveal Chapter / Evidence Grounding**、Batch Range、输出 JSON 格式、token 精简要求）+ 一段"Agent 工作流程"附录（通读章节 → 批量检索旧实体 → 按 canonical name 引用 → **evidence 定位章节** → 输出唯一 JSON）。
+- **只给 2 个工具**（都在 `agent-extractor.ts` 内联定义，Build 专用，Reader 永不使用）：
+  - `search_existing_entities`：批量检索知识库已有实体，一次可传 ≤40 个名字，返回命中实体的 `id/name/type/别名` + **`facts`/`anchors` 数量**（≤100 条；数据密度让模型判断稀疏实体是否该补充 MemoryAnchor）。目的：让模型复用已建实体，避免重复建实体；返回的 `name` 是 canonical name，最终 JSON 引用时必须用它（不能用文本里的别名再建实体）。
+  - `search_chapter_evidence`：在**当前 Batch 章节原文**中检索某个原文短语，返回它出现在哪些章节及上下文片段（参数 `query`）。用途：输出最终 JSON 前确认某条知识的 `evidence`（原文短引）到底在哪一章，从而正确填写 Reveal Chapter。只搜当前 Batch 原文，Reader 永远不会使用。
+- **无工具调用上限**：单批内模型可自由调工具，靠上下文窗口自然收敛；超长循环由 build session-log 观测（`.story/logs/build/`）。
+- 模型最终输出必须是一个 JSON 对象（9 个数组：`newEntities / aliases / facts / relations / abilities / events / memoryAnchors / possibleDuplicates / conflicts` + `batchSummary`）。**所有 temporal 记录（aliases/facts/relations/abilities/events/memoryAnchors/newEntities）都要带 `evidence`（该章原文短引）**。输出无法解析为 JSON → 抛错交 pipeline 重试。
 - **MemoryAnchor 是一等目标（P0：Character Recall）**：系统提示词（`build/prompts.ts` 的 `EXTRACTION_SYSTEM_PROMPT`）把 MemoryAnchor 重新定义为——"用户未来忘记人物名字后，可能会拿来描述这个人物、并借此重新定位他的具体记忆线索"（不是"重要剧情摘要/高重要度事件"），优先级不低于普通 Fact；并明确区分两个维度：`importance`（剧情重要度）与 `memorability`（记忆识别度）。同一提示词内包含 **Character Recall Sweep**：输出前对当前批次每个重要角色逐个检查（外貌/身体特征、典型行为、重复习惯、日常职责、说话方式、主角初见画面、具体互动、反复出现的物品/动作/场景、"读者忘记名字后最可能用什么模糊描述找他"），有高识别度线索就产出 MemoryAnchor——不因"准确率优先/只抽重要信息/控制输出长度"而过滤外貌、日常行为、习惯、典型动作、说话方式、日常职责等。
 - `memoryAnchors` 条目带 `kind`（轻量枚举）：`visual`（外貌/视觉画面）、`behavior`（典型行为/动作）、`habit`（习惯/重复特征）、`interaction`（与主角或重要角色的典型互动）、`role`（日常职责/团队定位）、`quote`（说话方式/口头特征）。旧输出无 `kind` 时校验器兼容为 `null`；给出非法值则整批校验失败。summary 允许略长（≤30 字）以保留"用户可能用来回忆的原话感"（如「高大沉默的三师兄，一路拉着装满戏台道具的板车」）。
-- 校验硬规则（`build/validation.ts`）：结构/类型/confidence、**【Batch Range】所有 chapter ∈ [start, end]**（防幻觉章节号）、`newEntities.type ∈ character|organization|location|item|concept`（能力/技能**永远**不能当实体类型）。校验失败 → `buildValidationFeedback` 点名 + `buildFixInstruction` 注入下次 prompt（见下"修复机制"）。
+- 校验硬规则（`build/validation.ts`）：结构/类型/confidence、**【Batch Range】所有 chapter ∈ [start, end]**（防幻觉章节号）、`newEntities.type ∈ character|organization|location|item|concept`（能力/技能**永远**不能当实体类型）、**【Evidence Grounding】aliases/facts/relations/abilities/memoryAnchors 必须给出 evidence，且 `chapter + evidence` 必须在对应章节原文中确定性验证**（normalize 空白/标点后 substring match；`events`/`newEntities` 的 evidence 可选但给出也会校验；`ability.acquiredChapter` 是 Story Time，不要求原文在当章直接出现、无需 evidence）。校验失败 → `buildValidationFeedback` 点名 + `buildFixInstruction` 注入下次 prompt（见下"修复机制"）。
 
 ### 入库（单事务，全部同步）
 ```
@@ -135,25 +137,36 @@ repo.db.exec("BEGIN")
 repo.db.exec("COMMIT")   # 任一步异常 → ROLLBACK，批次记 failed
 ```
 
+> ⚠️ **evidence 不入库**：模型输出的 `evidence`（原文短引）只用于 Build 期确定性校验，**不写入任何业务表**——Story DB 保持"纯结构化知识"，原文片段永不进入 Reader/Web 数据层（防剧透 + 原文隔离的结构性保证）。
+
 ### 修复机制（设计原则：数据修正权在 LLM，代码不静默改写）
 - 校验失败 → `buildValidationFeedback(raw, error)` **点名**非法条目（如"请从 newEntities 中删除：杀戮舞曲"）→ 作为 `input.feedback` 传入下一次抽取；
 - 下次 prompt 经 `buildFixInstruction(feedback)`（`build/prompts.ts`）注入"校验器原文 + 定向提示"；
+- **Evidence 失败也回填 feedback**：如"事实实体「闻人佑」…声明 chapter=384，但 evidence「平日里都是老三做饭」在第384章原文中不存在" → 定向提示让模型用 `search_chapter_evidence` 确认章节并换用该章真实 evidence；
 - **JSON 解析失败 / 输出截断也回填 feedback**（`pipeline.ts`）：模型输出无法解析（常见：混入解释文字、代码块围栏、**中文全角逗号/冒号当结构标点**）或达到输出上限被截断（模型"思考叙述"吃预算）时，`buildFixInstruction` 给出对应定向提示（禁前言文字 / 半角标点 / 精简输出），让重试真正会修。
 - **代码绝不静默改写/丢弃模型输出**（这是与"宽容修复"方案明确区分的设计决定）；若重试耗尽仍失败 → 批次响亮失败并记录原因。
 - 校验硬规则示例：`newEntities.type` 只允许 `character|organization|location|item|concept`，能力/技能禁止作为实体类型（能力走 `abilities` 数组）。
 
+### Evidence Grounding / Provenance（P0：Reveal Chapter 归因）
+- **问题**：旧 Build 里 LLM 正确理解"闻人佑负责做饭"，却把 chapter 填成 384（原文实际 396/397）、拉板车填成 391（原文 392）。Validator 只查 `start<=chapter<=end`，拦不住这种 **Temporal Attribution Error**。
+- **方案**：`chapter/fromChapter/firstSeenChapter` 不再是"LLM 凭记忆填的数字"，而是必须带 `evidence`（该章原文短引），由 `validateExtractionOutput` 用**当前 Batch 章节原文**做确定性验证：`normalizeEvidenceText(chapterText).includes(normalizeEvidenceText(evidence))`。校验失败 → 反馈回 LLM 修正（不静默改 chapter）。
+- **normalize 规则**（`validation.ts`）：NFKC（全角→半角）→ 移除所有标点/符号 → 移除所有空白（含换行）→ 小写 → substring。不做 embedding/模糊语义验证。
+- **最早证据**：同一 evidence 若在本 Batch 更早章节也出现，产生**非致命 warning**（提示 chapter 可能不是最早 Reveal Chapter，建议改用更早章节 evidence），不失败。
+- **evidence 是否持久化**：**否**。evidence 是原文片段，只存在于 Build 数据流（内存校验），**不写入 Story DB、不进任何 Reader-facing API**——这是"Reader 永远不能访问小说原文"硬约束的结构性保证（web `/api/entity` 全行序列化也不会泄漏）。可观测性：mainline 每批记录 `evidenceValidated`（带 evidence 记录数）与 `evidenceWarnings`。
+
 ### 可观测性
 - **主线/索引日志**：`.story/logs/build/mainline.jsonl`（`build/session-log.ts` 的 `BuildMainlineLogger`）——跨多次构建的追加式索引，一行一个事件，把每批 build 情况串成一根主线：
   - `run_start`：一次构建开始（provider/model/范围/批量策略/断点跳过数）；
-  - `batch`：每批一行 —— 区间/状态/产出统计（实体/别名/事实/关系/能力/事件/锚点/重复）/token/耗时/重试次数/失败原因/本批摘要 + **关联的 `session-*.jsonl` 完整轨迹文件路径**；
+  - `batch`：每批一行 —— 区间/状态/产出统计（实体/别名/事实/关系/能力/事件/锚点/重复）/token/耗时/重试次数/失败原因/本批摘要 + **`evidenceValidated`/`evidenceWarnings`**（Evidence Grounding 校验统计）+ **关联的 `session-*.jsonl` 完整轨迹文件路径**；
   - `run_end`：构建结束（总耗时/成败统计/跳过数/token 合计）。
   - 构建结束命令行（`story build` 与 TUI `/build` 面板）会打印 `runId`，据此在 mainline.jsonl 中定位本次构建。
 - **会话日志**：Agent 化抽取时每批完整轨迹（prompt/回复/工具调用/usage）落盘 `.story/logs/build/session-<时间戳>-<range>.jsonl`（`build/session-log.ts`）；
 - **性能指标**：`llm_logs` → `buildMetrics("extract")` 汇总 千字速度 / 千字 token / 缓存命中率 / 预估费用（`config.resolveLlmPrices` + `costEstimate`）。
 
-### Character Recall 集成测试（`scripts/recall-test.ts`）
-- 需要真实 LLM + 已有完整 Story DB：在 `test/.e2e/recall-proj` 复制完整 DB（不动真实项目）→ 用新版抽取重建 361~405 → 验证闻人佑 Recall Data（拉板车/高大沉默/做饭/板着脸/教【念】）→ 验证 5 个"模糊回忆"问题仅靠 `search_entities` 定位闻人佑 → 验证 userChapter=405 防剧透边界 + 完整 `story audit --chapter 405`。
-- 运行：`node dist/scripts/recall-test.js`（在项目根）。`node dist/scripts/recall-search-check.js` 只做搜索验证（不触发 LLM）。
+### Character Recall / Evidence 回归测试（`scripts/recall-test.ts`）
+- 需要真实 LLM + 已有完整 Story DB：在 `test/.e2e/recall-proj` 复制完整 DB（不动真实项目）→ 清理闻人佑旧数据 → 用新版抽取重建 361~405（**证据化抽取建议小批**：固定 5 章/批、retries≥6、failFast=false，否则单批几十条记录难以全部 ground 正确）→ 验证闻人佑 Recall Data（拉板车/高大沉默/做饭/板着脸/教【念】）→ **验证 Reveal Chapter 归因（拉车→392/393、做饭→396/397、教念→399/400，旧错误 384/391 不存在）** → 验证 5 个"模糊回忆"问题经 `search_entities` 定位闻人佑 → 验证 userChapter=405 防剧透边界 + 完整 `story audit --chapter 405`。
+- `node dist/scripts/recall-verify.js`：只对已重建的测试库做断言验证（数据层章节归因 + 5 问搜索），**不触发 LLM**。`node dist/scripts/recall-search-check.js` 只打印 5 问搜索结果。
+- 运行：`node dist/scripts/recall-test.js`（在项目根）。
 
 ---
 
@@ -198,7 +211,7 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
  │          （过滤"的人/是谁/的是/负责/进行"等虚词/泛化词），再叠加**idf 稀有度权重**（做饭/板车/教念
  │          这类高识别度词组权重大于 负责/戏道 这类常见词组）；另加中文一元字重叠（8/字，扁平）抓换序
  │          paraphrase（如「拉很重的车上山」↔「拉着板车登上丑峰」）；
- │        - 上限：记忆锚点 95（略低于 name 精确）、身份/性格事实 90、关系 90、事件低权重；
+ │        - 上限：记忆锚点 95（略低于 name 精确）、身份/性格事实 90、关系 95（与锚点同档，靠命中内容二元组数量 tie-break 决出）、事件低权重；
  │        - **同分 tie-break 按来源优先级**：记忆线索 > 身份/性格事实 > 关系 > 事件 > 名称包含——
  │          即"记忆线索"是最可信的模糊回忆来源；
  │        - matchedVia 直接给出命中的那条线索（如「记忆线索：高大沉默，一路拉着装满戏台道具的板车」
@@ -250,6 +263,7 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 6. **`story init <文件>` 会清空全部旧数据**（更换小说 = 用新文件重跑 init）；build 的 `failed` 批次不会被跳过，重跑自动重试。
 7. **三个概念不要混**：`availableThrough`（导入到哪）/ `builtThrough`（构建到哪）/ `userChapter`（读到哪）。
 8. **MemoryAnchor = 记忆线索（不是剧情摘要）**：Build 侧它是"读者忘记人物名字后拿来重新定位他的画面/行为/特征"，`importance`（剧情重要度）与 `memorability`（记忆识别度）是两回事；Reader 侧它是人物模糊召回的一等数据源（见 §4 搜索权重）。Schema 用 `kind` 标记线索类型（visual/behavior/habit/interaction/role/quote），旧数据兼容为 NULL。
+9. **Reveal Chapter 必须有证据**：任何影响 Reader Reveal Time 的 `chapter/fromChapter/firstSeenChapter` 都必须带 `evidence`（该章原文短引），由校验器对当前 Batch 原文做确定性验证（normalize 后 substring）。校验失败 → 反馈 LLM 修正；**代码绝不静默改 chapter，也不自动搜索全 Batch 偷偷修正**。evidence 是 Compiler provenance，不入库、不进 Reader。
 
 ---
 

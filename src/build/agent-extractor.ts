@@ -13,6 +13,7 @@ import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ExtractionInput, ExtractionResult } from "../llm/types.js";
 import { extractJson } from "../llm/openai.js";
 import { EXTRACTION_SYSTEM_PROMPT, buildFixInstruction } from "./prompts.js";
+import { normalizeEvidenceText } from "./validation.js";
 import type { BuildSessionLogger } from "./session-log.js";
 import type { NovelTool } from "../reader/tools.js";
 import { log, warn } from "../logger.js";
@@ -58,7 +59,10 @@ const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT}
 3. 【实体引用契约】命中已有实体后，最终 JSON 必须使用工具返回的 canonical name 作为 entityName/fromName/toName，
    不要使用当前文本中的别名再次创建实体（工具已通过别名定位到该实体）。
 4. 未命中检索的旧名字、以及真正第一次登场的新名字，一律作为新实体处理（newEntities 用 name 给出）。
-5. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，
+5. 【Evidence Grounding】每条 temporal 记录（chapter/fromChapter/firstSeenChapter）都要给出 evidence（原文短引）。
+   evidence 直接从你已读到的章节原文摘取即可；只有当你记不清某句出自哪一章、或要确认"最早"章节时，
+   才调用一次 search_chapter_evidence 检索——不要对每条记录都调用。
+6. 最后严格输出唯一一个 JSON 对象（格式见上）。除 JSON 输出或工具调用外，
    不要输出任何其他文字——禁止解释/思考/检索过程描述（中英文都不行），不要用 markdown 代码块围栏，
    结构标点必须用半角（, : { } [ ] "），避免中文全角标点（，：）。`;
 
@@ -126,6 +130,45 @@ ${chapters}
                 },
               ],
               details: { count: hits.length },
+            };
+          },
+        },
+        {
+          name: "search_chapter_evidence",
+          label: "检索章节原文证据",
+          description:
+            "在当前 Batch 章节原文中检索某个原文短语，返回它出现在哪些章节及上下文片段。用途：在输出最终 JSON 前，确认某条知识的 evidence（原文短引）到底出现在哪一章，从而正确填写 chapter（Reveal Chapter）与 evidence。这是 Build 专用工具，Ask/Reader 永远不会使用。",
+          parameters: Type.Object({
+            query: Type.String({ description: "要在章节原文中检索的短语，尽量是原文原句（如「老三闻人佑」「老三会做饭」「学【念】」）" }),
+            maxResults: Type.Optional(Type.Integer({ description: "最多返回的章节数，默认 10" })),
+          }),
+          execute: async (_id: string, params: any) => {
+            const q = params.query?.trim() ?? "";
+            if (!q) return { content: [{ type: "text", text: "查询为空。" }], details: { count: 0 } };
+            const nq = normalizeEvidenceText(q);
+            const max = Math.min(Math.max(params.maxResults ?? 10, 1), 50);
+            const results: { chapter: number; snippet: string }[] = [];
+            for (const t of input.texts) {
+              if (normalizeEvidenceText(t.text).includes(nq)) {
+                // 在原文里定位片段：优先按原文原句定位；找不到则回退取开头
+                const rawIdx = t.text.indexOf(q);
+                const snippet =
+                  rawIdx !== -1
+                    ? t.text.slice(Math.max(0, rawIdx - 15), Math.min(t.text.length, rawIdx + q.length + 30)).replace(/\s+/g, " ")
+                    : t.text.slice(0, 60).replace(/\s+/g, " ");
+                results.push({ chapter: t.chapter, snippet });
+              }
+            }
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: results.length
+                    ? JSON.stringify(results.slice(0, max))
+                    : `当前 Batch（第 ${input.startChapter}~${input.endChapter} 章）原文中未找到「${q}」。请换用更贴近原文的短语，或确认该信息确实在本批出现。`,
+                },
+              ],
+              details: { count: results.length },
             };
           },
         },

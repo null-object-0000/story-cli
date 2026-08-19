@@ -21,22 +21,28 @@ export const FACT_TYPES = new Set([
 export const MEMORY_ANCHOR_KINDS = new Set(["visual", "behavior", "habit", "interaction", "role", "quote"]);
 
 export interface ExtractionBundle {
-  newEntities: { name: string; type: string; firstSeenChapter: number }[];
-  aliases: { entityName: string; alias: string; fromChapter: number }[];
-  facts: { entityName: string; type: string; value: string; chapter: number; confidence: number }[];
-  relations: { fromName: string; toName: string; type: string; detail: string | null; chapter: number; confidence: number }[];
+  newEntities: { name: string; type: string; firstSeenChapter: number; evidence: string | null }[];
+  aliases: { entityName: string; alias: string; fromChapter: number; evidence: string | null }[];
+  facts: { entityName: string; type: string; value: string; chapter: number; confidence: number; evidence: string | null }[];
+  relations: {
+    fromName: string; toName: string; type: string; detail: string | null;
+    chapter: number; confidence: number; evidence: string | null;
+  }[];
   abilities: {
     entityName: string; name: string; category: string | null; system: string | null; path: string | null;
-    level: string | null; sourceEntity: string | null; acquiredChapter: number | null; summary: string | null; chapter: number;
+    level: string | null; sourceEntity: string | null; acquiredChapter: number | null; summary: string | null;
+    chapter: number; evidence: string | null;
   }[];
-  events: { chapter: number; participantNames: string[]; type: string; summary: string; importance: number }[];
+  events: { chapter: number; participantNames: string[]; type: string; summary: string; importance: number; evidence: string | null }[];
   memoryAnchors: {
     entityName: string; chapter: number; summary: string; kind: string | null;
-    importance: number; memorability: number; protagonistRelevance: number;
+    importance: number; memorability: number; protagonistRelevance: number; evidence: string | null;
   }[];
   possibleDuplicates: { entityA: string; entityB: string; reason: string }[];
   conflicts: { kind: string; entityName: string | null; detail: string; chapterA: number | null; chapterB: number | null }[];
   batchSummary: string | null;
+  /** 非致命提示（如"evidence 在更早章节也出现，可能不是最早 Reveal Chapter"），pipeline 只记日志不失败 */
+  warnings: string[];
 }
 
 export class ValidationError extends Error {}
@@ -98,12 +104,93 @@ function checkConfidence(v: unknown, label: string): number {
   return n;
 }
 
-export function validateExtractionOutput(raw: unknown, startChapter: number, endChapter: number): ExtractionBundle {
+// ---------- Evidence / Provenance Grounding ----------
+
+/** 证据文本归一化：NFKC（全角→半角）+ 移除所有标点/符号 + 移除所有空白（含换行）+ 小写。
+ *  用于"evidence 是否存在于该章原文"的确定性验证（只做 normalize + substring，不做语义/模糊匹配）。 */
+export function normalizeEvidenceText(s: string): string {
+  return (s || "")
+    .normalize("NFKC")
+    .replace(/[\p{P}\p{S}]/gu, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+/** evidence 是否存在于某章原文（normalize 后 substring match）。原文缺失 → false。 */
+export function evidenceInChapter(evidence: string, chapterText: string | undefined): boolean {
+  const e = normalizeEvidenceText(evidence);
+  if (!e) return false;
+  if (!chapterText) return false;
+  return normalizeEvidenceText(chapterText).includes(e);
+}
+
+/** 校验单条 temporal record 的 evidence：
+ *  - chapterTexts 提供时（真实 Build）：
+ *    · required 类型（facts/relations/memoryAnchors/aliases/abilities）：必须给出 evidence，且必须存在于声明章节原文；缺或错 → 抛错。
+ *    · optional 类型（events/newEntities 的 firstSeen）：evidence 可缺；给出但验证不过 → 仅 warning（不整批失败，避免可选字段反噬）。
+ *  - evidence 文本若在同一 Batch 的更早章节也出现，追加"可能不是最早 Reveal Chapter"的非致命 warning；
+ *  - chapterTexts 缺失时（纯单元测试）：不要求 evidence，也不做强验证。
+ *  校验失败抛 ValidationError（交给反馈循环回传 LLM 修正，代码不静默改写）。 */
+function checkEvidence(
+  record: {
+    kindLabel: string;
+    identify: string;
+    chapter: number;
+    evidence: string | null;
+    required: boolean;
+  },
+  chapterTexts: Map<number, string> | undefined,
+  warnings: string[]
+): void {
+  const ev = record.evidence;
+  if (!chapterTexts) return; // 无原文 map：不做 evidence 验证（单元测试/非 Build 调用）
+  const text = chapterTexts.get(record.chapter);
+  if (ev === null || ev.trim() === "") {
+    if (record.required) {
+      throw new ValidationError(
+        `${record.kindLabel}${record.identify} 缺少 evidence。\n` +
+          `每条会影响 Reveal Time 的记录（chapter/fromChapter/firstSeenChapter）都必须提供来自该章原文的 evidence（短引用即可，不要总结或编造）。`
+      );
+    }
+    return;
+  }
+  if (!evidenceInChapter(ev, text)) {
+    if (!record.required) {
+      // 可选类型：证据校验不过 → 非致命 warning（不整批失败）
+      warnings.push(
+        `${record.kindLabel}${record.identify}：evidence「${ev}」在第${record.chapter}章原文中不存在（可选字段，未据此拦截）。如需保留该记录，请改用该章真实原文 evidence。`
+      );
+      return;
+    }
+    throw new ValidationError(
+      `${record.kindLabel}${record.identify} 声明 chapter=${record.chapter}，但 evidence「${ev}」在第${record.chapter}章原文中不存在（normalize 后未匹配）。\n` +
+        `请重新确认该信息首次被读者得知的章节，并提供该章真实原文 evidence（短引用，来自当前 Batch）。`
+    );
+  }
+  // 最早证据 soft warning：同一 evidence 是否在更早章节也出现（提示 chapter 可能不是最早 Reveal）
+  const ne = normalizeEvidenceText(ev);
+  for (const [c, t] of chapterTexts) {
+    if (c < record.chapter && normalizeEvidenceText(t).includes(ne)) {
+      warnings.push(
+        `${record.kindLabel}${record.identify}：evidence「${ev}」在第${c}章也出现，声明章节 ${record.chapter} 可能不是最早 Reveal Chapter（如需更精确，请改用第${c}章的 evidence）。`
+      );
+      break;
+    }
+  }
+}
+
+export function validateExtractionOutput(
+  raw: unknown,
+  startChapter: number,
+  endChapter: number,
+  chapterTexts?: Map<number, string>
+): ExtractionBundle {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new ValidationError("输出必须是 JSON 对象");
   }
   const o = raw as Record<string, unknown>;
   const arr = (k: string): unknown[] => (Array.isArray(o[k]) ? (o[k] as unknown[]) : []);
+  const warnings: string[] = [];
 
   // entity refs in this batch（新实体名）
   const newNames = new Set<string>();
@@ -115,8 +202,10 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     if (!name) throw new ValidationError("newEntities.name 缺失");
     if (!type || !ENTITY_TYPES.includes(type as any)) throw new ValidationError(`newEntities.type 非法：${type}`);
     const chapter = checkChapterInRange((e as any).firstSeenChapter, startChapter, endChapter, `实体 ${name}`);
+    const evidence = str((e as any).evidence);
+    checkEvidence({ kindLabel: "新实体", identify: `「${name}」首次出场`, chapter, evidence, required: false }, chapterTexts, warnings);
     newNames.add(name);
-    newEntities.push({ name, type, firstSeenChapter: chapter });
+    newEntities.push({ name, type, firstSeenChapter: chapter, evidence });
   }
 
   const aliases: ExtractionBundle["aliases"] = [];
@@ -127,7 +216,9 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     if (!entityName) throw new ValidationError("aliases.entityName 缺失");
     if (!alias) throw new ValidationError("aliases.alias 缺失");
     const chapter = checkChapterInRange((a as any).fromChapter, startChapter, endChapter, `别名 ${alias}`);
-    aliases.push({ entityName, alias, fromChapter: chapter });
+    const evidence = str((a as any).evidence);
+    checkEvidence({ kindLabel: "别名", identify: `「${alias}」（→${entityName}）`, chapter, evidence, required: true }, chapterTexts, warnings);
+    aliases.push({ entityName, alias, fromChapter: chapter, evidence });
   }
 
   const facts: ExtractionBundle["facts"] = [];
@@ -141,7 +232,9 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     if (!value) throw new ValidationError("facts.value 缺失");
     const chapter = checkChapterInRange((f as any).chapter, startChapter, endChapter, `事实 ${value.slice(0, 20)}`);
     const confidence = checkConfidence((f as any).confidence ?? 0.8, `事实 ${value.slice(0, 20)}`);
-    facts.push({ entityName, type, value, chapter, confidence });
+    const evidence = str((f as any).evidence);
+    checkEvidence({ kindLabel: "事实", identify: `实体「${entityName}」「${value.slice(0, 20)}」`, chapter, evidence, required: true }, chapterTexts, warnings);
+    facts.push({ entityName, type, value, chapter, confidence, evidence });
     if (value.length > 500) throw new ValidationError(`事实描述过长：${value.slice(0, 30)}...`);
   }
 
@@ -156,7 +249,9 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     if (fromName === toName) throw new ValidationError(`关系两端不能相同：${fromName}`);
     const chapter = checkChapterInRange((r as any).chapter, startChapter, endChapter, `关系 ${fromName}-${toName}`);
     const confidence = checkConfidence((r as any).confidence ?? 0.8, `关系 ${fromName}-${toName}`);
-    relations.push({ fromName, toName, type, detail: str((r as any).detail), chapter, confidence });
+    const evidence = str((r as any).evidence);
+    checkEvidence({ kindLabel: "关系", identify: `${fromName}->${toName}「${type}」`, chapter, evidence, required: true }, chapterTexts, warnings);
+    relations.push({ fromName, toName, type, detail: str((r as any).detail), chapter, confidence, evidence });
   }
 
   const abilities: ExtractionBundle["abilities"] = [];
@@ -170,6 +265,9 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     let acquired: number | null = null;
     const ac = (ab as any).acquiredChapter;
     if (ac !== null && ac !== undefined && ac !== "") acquired = checkPastChapter(ac, endChapter, `能力 ${name} 获得章节`);
+    const evidence = str((ab as any).evidence);
+    // ability.chapter（Reveal Chapter）需要 evidence；acquiredChapter 是 Story Time（可能描述历史获得），不要求原文在当章直接出现
+    checkEvidence({ kindLabel: "能力", identify: `实体「${entityName}」能力「${name}」`, chapter, evidence, required: true }, chapterTexts, warnings);
     abilities.push({
       entityName, name,
       category: str((ab as any).category),
@@ -180,6 +278,7 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
       acquiredChapter: acquired,
       summary: str((ab as any).summary),
       chapter,
+      evidence,
     });
   }
 
@@ -193,7 +292,9 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     if (ps !== undefined && ps !== null && !Array.isArray(ps)) throw new ValidationError("events.participantNames 必须是数组");
     const names = Array.isArray(ps) ? (ps as unknown[]).filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean) : [];
     const importn = num((e as any).importance) ?? 0.5;
-    events.push({ chapter, participantNames: names, type: str((e as any).type) ?? "other", summary, importance: Math.min(1, Math.max(0, importn)) });
+    const evidence = str((e as any).evidence);
+    checkEvidence({ kindLabel: "事件", identify: `「${summary.slice(0, 20)}」`, chapter, evidence, required: false }, chapterTexts, warnings);
+    events.push({ chapter, participantNames: names, type: str((e as any).type) ?? "other", summary, importance: Math.min(1, Math.max(0, importn)), evidence });
   }
 
   const memoryAnchors: ExtractionBundle["memoryAnchors"] = [];
@@ -216,11 +317,14 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     const imp = num((m as any).importance) ?? 0.5;
     const mem = num((m as any).memorability) ?? 0.7;
     const pr = num((m as any).protagonistRelevance) ?? 0.5;
+    const evidence = str((m as any).evidence);
+    checkEvidence({ kindLabel: "记忆锚点", identify: `实体「${entityName}」「${summary.slice(0, 16)}」`, chapter, evidence, required: true }, chapterTexts, warnings);
     memoryAnchors.push({
       entityName, chapter, summary, kind,
       importance: Math.min(1, Math.max(0, imp)),
       memorability: Math.min(1, Math.max(0, mem)),
       protagonistRelevance: Math.min(1, Math.max(0, pr)),
+      evidence,
     });
   }
 
@@ -255,6 +359,6 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
 
   return {
     newEntities, aliases, facts, relations, abilities, events, memoryAnchors,
-    possibleDuplicates, conflicts, batchSummary: summary,
+    possibleDuplicates, conflicts, batchSummary: summary, warnings,
   };
 }
