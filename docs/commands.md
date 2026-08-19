@@ -114,7 +114,9 @@ Build 只走 Agent 化抽取（注入式已移除）。与 Ask 的 Reader Agent 
 ### 入库（单事务，全部同步）
 ```
 repo.db.exec("BEGIN")
-  newEntities → upsertEntity（same-name-different-type 自动写 possible_duplicates）
+  newEntities → upsertEntity（same-name-different-type 自动写 possible_duplicates；
+                 id 碰撞兜底：模型给名字加装饰标点（如「【浮生绘】」vs「浮生绘」）时归一化 id 相同，
+                 并入已有实体并把新名字挂为别名，避免 UNIQUE 冲突整批失败）
   aliases      → addAlias（clash 时 aliasClashToDuplicate 转疑似重复）
   facts        → addFact
   relations    → addRelation

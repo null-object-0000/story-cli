@@ -47,10 +47,12 @@ export async function agentExtract(
   const onActivity = callbacks?.onActivity;
   const sessionLog = callbacks?.sessionLog;
 
-  const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT.replaceAll("__START_CHAPTER__", String(input.startChapter)).replaceAll("__END_CHAPTER__", String(input.endChapter))}
+  // 系统提示词【跨批完全静态】（批次起止范围只出现在用户消息的「待抽取章节」里）：
+// 前缀缓存（deepseek 对相同前缀命中 cacheRead，50x 便宜且 prefill 更快）因此可跨批次复用。
+const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT}
 
 ## Agent 工作流程（必须遵守）
-1. 通读「待抽取章节」（第 ${input.startChapter}~${input.endChapter} 章）。
+1. 通读「待抽取章节」（起止章号见用户消息中的「待抽取章节」标题）。
 2. 若文中出现的人物/组织可能【已在知识库中】存在（主角、常驻配角、已有组织等旧实体），
    调用工具 search_existing_entities 批量检索。工具返回结果的 name 是 canonical name（正式名）。
 3. 【实体引用契约】命中已有实体后，最终 JSON 必须使用工具返回的 canonical name 作为 entityName/fromName/toName，

@@ -275,6 +275,19 @@ export class StoryRepo {
       return { id: existing.id, created: false };
     }
     const id = entityId(type, name);
+    // id 碰撞兜底：生成 id 已存在但全名不同（模型给名字加了装饰标点等，如「【浮生绘】」vs「浮生绘」——
+    // entityId 会把非字母数字归一成 _，两者得到同一 id）。视为同一实体的变体：并入已有实体、
+    // 把新名字挂为别名（保留可追溯性），不新建、不报 UNIQUE 冲突（避免整批入库失败）。
+    const byId = this.getEntityByIdRaw(id);
+    if (byId) {
+      this.db
+        .prepare(
+          "UPDATE entities SET first_seen_chapter=MIN(first_seen_chapter, ?), last_seen_chapter=MAX(COALESCE(last_seen_chapter,0), ?) WHERE id=?"
+        )
+        .run(chapter, chapter, id);
+      if (byId.name !== name) this.addAlias(id, name, chapter);
+      return { id, created: false };
+    }
     // 先插入实体（possible_duplicates 有外键约束，冲突记录须在实体存在后写入）
     this.db
       .prepare("INSERT INTO entities(id,type,name,first_seen_chapter,last_seen_chapter) VALUES(?,?,?,?,?)")
