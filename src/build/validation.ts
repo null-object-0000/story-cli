@@ -15,6 +15,11 @@ export const FACT_TYPES = new Set([
   "appearance", "ability", "habit", "description", "other",
 ]);
 
+/** MemoryAnchor 记忆线索类型（轻量，不做复杂 ontology）：
+ *  visual=外貌/视觉画面 | behavior=典型行为/动作 | habit=习惯/重复特征 |
+ *  interaction=与主角或重要角色的典型互动 | role=日常职责/团队定位 | quote=说话方式/口头特征 */
+export const MEMORY_ANCHOR_KINDS = new Set(["visual", "behavior", "habit", "interaction", "role", "quote"]);
+
 export interface ExtractionBundle {
   newEntities: { name: string; type: string; firstSeenChapter: number }[];
   aliases: { entityName: string; alias: string; fromChapter: number }[];
@@ -26,7 +31,7 @@ export interface ExtractionBundle {
   }[];
   events: { chapter: number; participantNames: string[]; type: string; summary: string; importance: number }[];
   memoryAnchors: {
-    entityName: string; chapter: number; summary: string;
+    entityName: string; chapter: number; summary: string; kind: string | null;
     importance: number; memorability: number; protagonistRelevance: number;
   }[];
   possibleDuplicates: { entityA: string; entityB: string; reason: string }[];
@@ -199,11 +204,20 @@ export function validateExtractionOutput(raw: unknown, startChapter: number, end
     if (!entityName) throw new ValidationError("memoryAnchors.entityName 缺失");
     if (!summary) throw new ValidationError("memoryAnchors.summary 缺失");
     const chapter = checkChapterInRange((m as any).chapter, startChapter, endChapter, `记忆锚点 ${summary.slice(0, 16)}`);
+    // kind：可选；给出时必须是合法类型（轻量枚举，避免自由文本漂移）
+    let kind: string | null = null;
+    const rawKind = (m as any).kind;
+    if (rawKind !== null && rawKind !== undefined && rawKind !== "") {
+      kind = str(rawKind);
+      if (kind === null || !MEMORY_ANCHOR_KINDS.has(kind)) {
+        throw new ValidationError(`记忆锚点 kind 非法：${JSON.stringify(rawKind)}（允许：${[...MEMORY_ANCHOR_KINDS].join("|")}）`);
+      }
+    }
     const imp = num((m as any).importance) ?? 0.5;
     const mem = num((m as any).memorability) ?? 0.7;
     const pr = num((m as any).protagonistRelevance) ?? 0.5;
     memoryAnchors.push({
-      entityName, chapter, summary,
+      entityName, chapter, summary, kind,
       importance: Math.min(1, Math.max(0, imp)),
       memorability: Math.min(1, Math.max(0, mem)),
       protagonistRelevance: Math.min(1, Math.max(0, pr)),

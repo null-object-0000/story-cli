@@ -85,6 +85,7 @@ export interface MemoryAnchorRow {
   entity_id: string;
   chapter: number;
   summary: string;
+  kind: string | null;
   importance: number;
   memorability: number;
   protagonist_relevance: number;
@@ -142,6 +143,7 @@ export class StoryRepo {
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(SCHEMA_SQL);
     this.ensureLlmLogColumns();
+    this.ensureMemoryAnchorKindColumn();
     this.db.prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("schema_version", SCHEMA_VERSION);
   }
 
@@ -155,6 +157,16 @@ export class StoryRepo {
       if (!cols.includes("input_uncached_tokens")) this.db.exec("ALTER TABLE llm_logs ADD COLUMN input_uncached_tokens INTEGER NOT NULL DEFAULT 0");
       // 历史行回填（幂等）：无缓存数据的旧行，纯新增输入 = 总输入（缓存命中率按 0 计）
       this.db.exec("UPDATE llm_logs SET input_uncached_tokens = input_tokens WHERE input_uncached_tokens = 0 AND input_tokens > 0");
+    } catch {
+      // 表不存在时忽略（schema 会创建）
+    }
+  }
+
+  /** 旧库迁移：memory_anchors 新增 kind 列（记忆线索类型，旧数据为 NULL 兼容） */
+  private ensureMemoryAnchorKindColumn(): void {
+    try {
+      const cols = (this.db.prepare("PRAGMA table_info(memory_anchors)").all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes("kind")) this.db.exec("ALTER TABLE memory_anchors ADD COLUMN kind TEXT");
     } catch {
       // 表不存在时忽略（schema 会创建）
     }
@@ -494,14 +506,15 @@ export class StoryRepo {
     summary: string,
     importance: number,
     memorability: number,
-    protagonistRelevance: number
+    protagonistRelevance: number,
+    kind?: string | null
   ): boolean {
     this.assertChapter(chapter);
     const r = this.db
       .prepare(
-        "INSERT OR IGNORE INTO memory_anchors(entity_id,chapter,summary,importance,memorability,protagonist_relevance) VALUES(?,?,?,?,?,?)"
+        "INSERT OR IGNORE INTO memory_anchors(entity_id,chapter,summary,kind,importance,memorability,protagonist_relevance) VALUES(?,?,?,?,?,?,?)"
       )
-      .run(entityIdRef, chapter, summary, importance, memorability, protagonistRelevance);
+      .run(entityIdRef, chapter, summary, kind ?? null, importance, memorability, protagonistRelevance);
     return r.changes > 0;
   }
   listMemoryAnchors(entityIdRef?: string): MemoryAnchorRow[] {
@@ -741,13 +754,13 @@ export class StoryRepo {
           .run(toId, a.name, a.category, a.system, a.path, a.level, a.source_entity, a.acquired_chapter, a.summary, a.chapter, a.confidence);
       }
       this.db.prepare("DELETE FROM abilities WHERE entity_id=?").run(fromId);
-      const moveAnchors = this.db.prepare("SELECT chapter,summary,importance,memorability,protagonist_relevance,status FROM memory_anchors WHERE entity_id=?");
-      for (const a of rows<{ chapter: number; summary: string; importance: number; memorability: number; protagonist_relevance: number; status: string }>(moveAnchors.all(fromId))) {
+      const moveAnchors = this.db.prepare("SELECT chapter,summary,kind,importance,memorability,protagonist_relevance,status FROM memory_anchors WHERE entity_id=?");
+      for (const a of rows<{ chapter: number; summary: string; kind: string | null; importance: number; memorability: number; protagonist_relevance: number; status: string }>(moveAnchors.all(fromId))) {
         this.db
           .prepare(
-            "INSERT OR IGNORE INTO memory_anchors(entity_id,chapter,summary,importance,memorability,protagonist_relevance,status) VALUES(?,?,?,?,?,?,?)"
+            "INSERT OR IGNORE INTO memory_anchors(entity_id,chapter,summary,kind,importance,memorability,protagonist_relevance,status) VALUES(?,?,?,?,?,?,?,?)"
           )
-          .run(toId, a.chapter, a.summary, a.importance, a.memorability, a.protagonist_relevance, a.status);
+          .run(toId, a.chapter, a.summary, a.kind, a.importance, a.memorability, a.protagonist_relevance, a.status);
       }
       this.db.prepare("DELETE FROM memory_anchors WHERE entity_id=?").run(fromId);
       const moveAppearances = this.db.prepare("SELECT chapter, mentions FROM entity_appearances WHERE entity_id=?");

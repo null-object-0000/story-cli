@@ -87,7 +87,7 @@ ${chapters}
           name: "search_existing_entities",
           label: "检索已有实体",
           description:
-            "批量检索知识库中已存在的实体。传入章节文本中出现的、你可能想复用的名字（正式名/别名/固定称呼），返回命中实体的 id/name/type 及别名。返回结果中的 name 是 canonical name（正式名）：最终 JSON 必须使用该 canonical name 作为 entityName/fromName/toName，避免用别名创建重复实体。",
+            "批量检索知识库中已存在的实体。传入章节文本中出现的、你可能想复用的名字（正式名/别名/固定称呼），返回命中实体的 id/name/type、别名，以及 facts/anchors 数量（用于判断该实体数据是否稀疏、是否需要补充 MemoryAnchor）。返回结果中的 name 是 canonical name（正式名）：最终 JSON 必须使用该 canonical name 作为 entityName/fromName/toName，避免用别名创建重复实体。",
           parameters: Type.Object({
             names: Type.Array(Type.String({ description: "待检索的名字列表（最多 40 个）" }), {
               maxItems: MAX_QUERY_NAMES,
@@ -96,7 +96,7 @@ ${chapters}
           }),
           execute: async (_id: string, params: any) => {
             const seen = new Set<string>();
-            const hits: { id: string; name: string; type: string; aliases: string[] }[] = [];
+            const hits: { id: string; name: string; type: string; aliases: string[]; facts: number; anchors: number }[] = [];
             for (const raw of (params as { names?: string[] }).names ?? []) {
               const name = raw.trim();
               if (!name || seen.has(name) || hits.length >= 100) continue;
@@ -108,6 +108,11 @@ ${chapters}
                   name: e.name,
                   type: e.type,
                   aliases: repo.listAliases(e.id).slice(0, 10).map((a) => a.alias),
+                  // 数据密度：让模型判断该实体"已有什么、缺什么"——
+                  // 若 facts/anchors 很少，本批出现的鲜明识别线索应补上（尤其 MemoryAnchor），
+                  // 避免"绝不重复已有内容"的规则误伤稀疏实体的 Recall 数据
+                  facts: repo.listFacts(e.id).length,
+                  anchors: repo.listMemoryAnchors(e.id).length,
                 });
               }
             }

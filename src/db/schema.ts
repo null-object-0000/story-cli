@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS memory_anchors (
   entity_id             TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   chapter               INTEGER NOT NULL CHECK (chapter >= 1),
   summary               TEXT NOT NULL,
+  kind                  TEXT,              -- 记忆线索类型：visual|behavior|habit|interaction|role|quote（旧数据为 NULL）
   importance            REAL NOT NULL DEFAULT 0.5,
   memorability          REAL NOT NULL DEFAULT 0.7,
   protagonist_relevance REAL NOT NULL DEFAULT 0.5,

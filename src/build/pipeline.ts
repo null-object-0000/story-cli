@@ -111,7 +111,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   const maxTokens = Math.max(1024, opts.maxTokens ?? caps?.maxTokens ?? 8192);
   const autoBatch = opts.autoBatch ?? true;
   const maxBatchChapters = Math.max(1, opts.maxBatchChapters ?? 60);
-  const perChapterOutput = Math.max(80, opts.perChapterOutputTokens ?? 260);
+  const perChapterOutput = Math.max(80, opts.perChapterOutputTokens ?? 320);
   // 固定开销：system prompt + JSON 指令 + 输出外壳 + 实体索引（粗估）
   const fixedOverhead = 3000;
   // 输入预算：上下文减去输出预留，留 10% 安全余量
@@ -459,7 +459,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       }
       for (const m of bundle.memoryAnchors) {
         const id = ensureEntity(m.entityName, m.chapter);
-        if (id && repo.addMemoryAnchor(id, m.chapter, m.summary, m.importance, m.memorability, m.protagonistRelevance)) counts.memoryAnchors++;
+        if (id && repo.addMemoryAnchor(id, m.chapter, m.summary, m.importance, m.memorability, m.protagonistRelevance, m.kind)) counts.memoryAnchors++;
       }
       for (const d of bundle.possibleDuplicates) {
         const aId = repo.findEntityByName(d.entityA)?.id;

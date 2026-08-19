@@ -76,6 +76,10 @@ cmdBuild
      │     · 自适应模式 autoBatch（**默认**，config.build.autoBatch=true）：按上下文预算动态合并
      │         inputBudget = (contextWindow − maxTokens) × 0.9 − 固定开销(3000)
      │         单批上限 min(maxBatchChapters, 输出预算折算的章数)
+      │         · 输出预算按 config.build.perChapterOutputTokens 折算（默认 320，曾为 260——为 MemoryAnchor 留出预算）；
+      │           maxBatchChapters 默认仍 60。真实 60 章大批下 Recall 数据被挤掉的主因是提示词"只抽重要信息/
+      │           控制输出长度"的过滤倾向 + "绝不重复已有内容"对稀疏实体的误伤，已由 MemoryAnchor 一等目标 +
+      │           Character Recall Sweep + 工具返回 facts/anchors 稀疏度 修正，故本次未缩小默认批量（避免成本失控）
      │         · contextWindow/maxTokens 来源：config.llm.{contextWindow,maxTokens} > 环境变量
      │           LLM_CONTEXT_WINDOW/LLM_MAX_TOKENS > 按模型名内置规格（deepseek-v4-flash/pro = 1M 上下文/256K 输出，
      │           对齐 deepseek-harness llm-deepseek 的 1_000_000/256e3 默认）> provider.getCapabilities() > 默认（128k / 8192）；
@@ -106,9 +110,11 @@ cmdBuild
 Build 只走 Agent 化抽取（注入式已移除）。与 Ask 的 Reader Agent 不同，**抽取 Agent 读原文**、只产出结构化数据：
 
 - 用 pi-agent-core `Agent` 跑完整循环（含工具调用），系统提示词 = `build/prompts.ts` 的 `EXTRACTION_SYSTEM_PROMPT`（角色定义、抽取原则、实体引用契约、Batch Range、输出 JSON 格式、token 精简要求）+ 一段"Agent 工作流程"附录（通读章节 → 批量检索旧实体 → 按 canonical name 引用 → 输出唯一 JSON）。
-- **只给 1 个工具**：`search_existing_entities`（`agent-extractor.ts` 内联定义）——批量检索知识库已有实体，一次可传 ≤40 个名字，返回命中实体的 `id/name/type/别名`（≤100 条）。目的：让模型复用已建实体，避免重复建实体；返回的 `name` 是 canonical name，最终 JSON 引用时必须用它（不能用文本里的别名再建实体）。
+- **只给 1 个工具**：`search_existing_entities`（`agent-extractor.ts` 内联定义）——批量检索知识库已有实体，一次可传 ≤40 个名字，返回命中实体的 `id/name/type/别名` + **`facts`/`anchors` 数量**（≤100 条；数据密度让模型判断稀疏实体是否该补充 MemoryAnchor）。目的：让模型复用已建实体，避免重复建实体；返回的 `name` 是 canonical name，最终 JSON 引用时必须用它（不能用文本里的别名再建实体）。
 - **无工具调用上限**：单批内模型可自由调 `search_existing_entities`（每次 ≤40 个名字），靠上下文窗口自然收敛；超长循环由 build session-log 观测（`.story/logs/build/`）。
 - 模型最终输出必须是一个 JSON 对象（9 个数组：`newEntities / aliases / facts / relations / abilities / events / memoryAnchors / possibleDuplicates / conflicts` + `batchSummary`）。输出无法解析为 JSON → 抛错交 pipeline 重试。
+- **MemoryAnchor 是一等目标（P0：Character Recall）**：系统提示词（`build/prompts.ts` 的 `EXTRACTION_SYSTEM_PROMPT`）把 MemoryAnchor 重新定义为——"用户未来忘记人物名字后，可能会拿来描述这个人物、并借此重新定位他的具体记忆线索"（不是"重要剧情摘要/高重要度事件"），优先级不低于普通 Fact；并明确区分两个维度：`importance`（剧情重要度）与 `memorability`（记忆识别度）。同一提示词内包含 **Character Recall Sweep**：输出前对当前批次每个重要角色逐个检查（外貌/身体特征、典型行为、重复习惯、日常职责、说话方式、主角初见画面、具体互动、反复出现的物品/动作/场景、"读者忘记名字后最可能用什么模糊描述找他"），有高识别度线索就产出 MemoryAnchor——不因"准确率优先/只抽重要信息/控制输出长度"而过滤外貌、日常行为、习惯、典型动作、说话方式、日常职责等。
+- `memoryAnchors` 条目带 `kind`（轻量枚举）：`visual`（外貌/视觉画面）、`behavior`（典型行为/动作）、`habit`（习惯/重复特征）、`interaction`（与主角或重要角色的典型互动）、`role`（日常职责/团队定位）、`quote`（说话方式/口头特征）。旧输出无 `kind` 时校验器兼容为 `null`；给出非法值则整批校验失败。summary 允许略长（≤30 字）以保留"用户可能用来回忆的原话感"（如「高大沉默的三师兄，一路拉着装满戏台道具的板车」）。
 - 校验硬规则（`build/validation.ts`）：结构/类型/confidence、**【Batch Range】所有 chapter ∈ [start, end]**（防幻觉章节号）、`newEntities.type ∈ character|organization|location|item|concept`（能力/技能**永远**不能当实体类型）。校验失败 → `buildValidationFeedback` 点名 + `buildFixInstruction` 注入下次 prompt（见下"修复机制"）。
 
 ### 入库（单事务，全部同步）
@@ -122,7 +128,7 @@ repo.db.exec("BEGIN")
   relations    → addRelation
   abilities    → addAbility
   events       → addEvent
-  memoryAnchors→ addMemoryAnchor
+  memoryAnchors→ addMemoryAnchor（带 kind：visual|behavior|habit|interaction|role|quote）
   possibleDuplicates → addPossibleDuplicate
   conflicts    → addConflict
   countAppearances → entity_appearances（按实体名/别名统计出场次数）
@@ -144,6 +150,10 @@ repo.db.exec("COMMIT")   # 任一步异常 → ROLLBACK，批次记 failed
   - 构建结束命令行（`story build` 与 TUI `/build` 面板）会打印 `runId`，据此在 mainline.jsonl 中定位本次构建。
 - **会话日志**：Agent 化抽取时每批完整轨迹（prompt/回复/工具调用/usage）落盘 `.story/logs/build/session-<时间戳>-<range>.jsonl`（`build/session-log.ts`）；
 - **性能指标**：`llm_logs` → `buildMetrics("extract")` 汇总 千字速度 / 千字 token / 缓存命中率 / 预估费用（`config.resolveLlmPrices` + `costEstimate`）。
+
+### Character Recall 集成测试（`scripts/recall-test.ts`）
+- 需要真实 LLM + 已有完整 Story DB：在 `test/.e2e/recall-proj` 复制完整 DB（不动真实项目）→ 用新版抽取重建 361~405 → 验证闻人佑 Recall Data（拉板车/高大沉默/做饭/板着脸/教【念】）→ 验证 5 个"模糊回忆"问题仅靠 `search_entities` 定位闻人佑 → 验证 userChapter=405 防剧透边界 + 完整 `story audit --chapter 405`。
+- 运行：`node dist/scripts/recall-test.js`（在项目根）。`node dist/scripts/recall-search-check.js` 只做搜索验证（不触发 LLM）。
 
 ---
 
@@ -181,7 +191,21 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
  │      RECALL_CHARACTER / LIST_ABILITIES / ABILITY_LOOKUP / CHARACTER_RELATION /
  │      CHARACTER_HISTORY / LAST_APPEARANCE / ENTITY_SEARCH / GENERAL_STRUCTURED_QA
  ├─ 3. 实体解析：searchEntities(repo, question, topK)   # reader/search.ts
- │      · 名称/别名 精确/包含 + shingle(2) 重叠打分（身份/锚点/事件/关系文本参与）
+ │      · 权重（Memory-first，绝不所有字段等权拼接）：
+ │        - name 精确 100 / 别名精确同高 / name·别名包含 55；
+ │        - **MemoryAnchor 是人物模糊召回的一等来源**：锚点/事实/关系都**逐条**独立打分
+ │          （避免长文本拼接产生巧合匹配），核心信号是"内容二元组"重叠——两个字符都是实义字才算
+ │          （过滤"的人/是谁/的是/负责/进行"等虚词/泛化词），再叠加**idf 稀有度权重**（做饭/板车/教念
+ │          这类高识别度词组权重大于 负责/戏道 这类常见词组）；另加中文一元字重叠（8/字，扁平）抓换序
+ │          paraphrase（如「拉很重的车上山」↔「拉着板车登上丑峰」）；
+ │        - 上限：记忆锚点 95（略低于 name 精确）、身份/性格事实 90、关系 90、事件低权重；
+ │        - **同分 tie-break 按来源优先级**：记忆线索 > 身份/性格事实 > 关系 > 事件 > 名称包含——
+ │          即"记忆线索"是最可信的模糊回忆来源；
+ │        - matchedVia 直接给出命中的那条线索（如「记忆线索：高大沉默，一路拉着装满戏台道具的板车」
+ │          「关系：师兄妹 三师兄,教授【念】」），Reader Agent 因此知道候选为何被召回；
+ │        - 性格/外貌/习惯（personality/appearance/habit/description）已并入搜索索引（此前仅身份类事实参与）；
+ │        - 关系 detail 只归给"被点名"的一端（如「三师兄,教授【念】」归 闻人佑 而非 陈伶），
+ │          支撑"教陈伶【念】的人是谁"这类以关系定位的回忆问题
  │      · "主角"关键词命中 → 主角提权
  ├─ 4. 弱命中兜底：LLM 模式无命中或分数过低 → 给 LLM 结构化实体索引（buildEntityIndexDigest）做二次消歧
  ├─ 5. 构造上下文 buildContext → StructuredContext（reader/context.ts）
@@ -225,6 +249,7 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 5. **能力/技能不是实体类型**：`ENTITY_TYPES` 仅 `character|organization|location|item|concept`。
 6. **`story init <文件>` 会清空全部旧数据**（更换小说 = 用新文件重跑 init）；build 的 `failed` 批次不会被跳过，重跑自动重试。
 7. **三个概念不要混**：`availableThrough`（导入到哪）/ `builtThrough`（构建到哪）/ `userChapter`（读到哪）。
+8. **MemoryAnchor = 记忆线索（不是剧情摘要）**：Build 侧它是"读者忘记人物名字后拿来重新定位他的画面/行为/特征"，`importance`（剧情重要度）与 `memorability`（记忆识别度）是两回事；Reader 侧它是人物模糊召回的一等数据源（见 §4 搜索权重）。Schema 用 `kind` 标记线索类型（visual/behavior/habit/interaction/role/quote），旧数据兼容为 NULL。
 
 ---
 
@@ -286,7 +311,7 @@ Ask 的 Agent 路径 = **系统提示词（`src/reader/system-prompt.ts`） + �
 
 | 工具 | 作用 | 参数 |
 |---|---|---|
-| `search_entities` | 按描述/特征模糊搜实体（外号、身份定位） | `query`（必）、`topK`（可选 ≤10） |
+| `search_entities` | 按描述/特征模糊搜实体（外号、身份定位、记忆线索召回——「做饭的三师兄」「拉板车的人」） | `query`（必）、`topK`（可选 ≤10） |
 | `get_entity` | 取实体完整档案（身份/性格/锚点/关系/事件/出场） | `name`（必） |
 | `list_abilities` | 列某实体能力（或全书，按 focus 过滤） | `entity_name`（可选） |
 | `get_relations` | 查实体关系（单实体全部 / 双实体之间） | `entity_a`（必）、`entity_b`（可选） |

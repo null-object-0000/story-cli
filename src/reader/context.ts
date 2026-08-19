@@ -18,7 +18,7 @@ export interface EntityCard {
   appearanceChapterCount: number;
   identityFacts: { type: string; value: string; chapter: number; confidence: number }[];
   personalityFacts: { type: string; value: string; chapter: number; confidence: number }[];
-  recallAnchors: { chapter: number; summary: string; score: number }[];
+  recallAnchors: { chapter: number; kind: string | null; summary: string; score: number }[];
   relations: { with: string; type: string; detail: string | null; chapter: number; confidence: number; protagonist: boolean }[];
   recentEvents: { chapter: number; type: string; summary: string }[];
 }
@@ -59,6 +59,7 @@ export function buildEntityCard(repo: StoryRepo, entity: EntityRow, protagonistI
   const uc = userChapter ?? repo.availableThrough() ?? 0;
   const anchors = topAnchors(repo.listMemoryAnchors(entity.id), uc, 5).map((a) => ({
     chapter: a.chapter,
+    kind: a.kind,
     summary: a.summary,
     score: Math.round(
       ((0.35 * a.importance + 0.35 * a.memorability + 0.15 * a.protagonist_relevance + 0.15 * (uc > 0 ? a.chapter / uc : 0)) * 100)

@@ -28,7 +28,7 @@ export interface StoryConfig {
     batchSize: number;      // 固定批大小（autoBatch=false 时使用）
     retries: number;
     autoBatch?: boolean;    // 自适应合并：按模型上下文动态决定每批章节数（默认 true）
-    perChapterOutputTokens?: number; // 每章结构化输出的 token 估算（用于输出预算，默认 260）
+    perChapterOutputTokens?: number; // 每章结构化输出的 token 估算（用于输出预算，默认 320；给 MemoryAnchor 留出预算）
     maxBatchChapters?: number;       // 单批章节数上限（防单批过大，默认 60）
     sessionLog?: boolean;     // 会话日志：每批完整 prompt/回复/工具轨迹落盘 .story/logs/build/（默认 true）
   };
@@ -65,7 +65,7 @@ export const DEFAULT_CONFIG: StoryConfig = {
   // book 不预设具体小说：未 import 前为空（顶部/提示用「未导入」兜底），import 时按文件名/--book 确定
   book: "",
   userChapter: 1,
-  build: { batchSize: 1, retries: 2, autoBatch: true, perChapterOutputTokens: 260, maxBatchChapters: 60 },
+  build: { batchSize: 1, retries: 2, autoBatch: true, perChapterOutputTokens: 320, maxBatchChapters: 60 },
 };
 
 /** 项目根：V0.1 使用当前工作目录下的 .story */
@@ -111,7 +111,7 @@ export function initProject(opts: { book?: string; userChapter?: number } = {}, 
       batchSize: DEFAULT_CONFIG.build?.batchSize ?? 1,
       retries: DEFAULT_CONFIG.build?.retries ?? 2,
       autoBatch: DEFAULT_CONFIG.build?.autoBatch ?? true,
-      perChapterOutputTokens: DEFAULT_CONFIG.build?.perChapterOutputTokens ?? 260,
+      perChapterOutputTokens: DEFAULT_CONFIG.build?.perChapterOutputTokens ?? 320,
       maxBatchChapters: DEFAULT_CONFIG.build?.maxBatchChapters ?? 60,
     },
   };

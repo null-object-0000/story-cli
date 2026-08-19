@@ -25,7 +25,7 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
    - 【组织-人名并列模式·重要】当原文出现「XX财团/集团/公司/家族/门派——人名」「人名（XX财团）」等名片/并列格式时：
      先为这个组织建实体（organization，若本批/库中没有），再给该人物一条 affiliation 事实（value 写组织名），
      人物关系得当出现具体互动时才建 relations——仅"同现"不建。例：「黄氏财团——黄簌月」→ newEntities 加 黄氏财团(organization) + facts:[黄簌月, affiliation, 黄氏财团]。
-   - MemoryAnchor：能帮助读者"瞬间想起这个人是谁"的、短小具体有画面感的瞬间（如"一路拉着装满戏台道具板车的高大男人"）。判断标准：这个人物100章以后突然再次出现，这条信息是否可能让读者想起他？
+   - MemoryAnchor：见下方专节「MemoryAnchor（记忆锚点）—— 一等目标」与「Character Recall Sweep」。它是"读者未来忘记人物名字后拿来重新定位他的记忆线索"，优先级不低于普通 Fact。
 4. 所有记录必须带 chapter（章节号），chapter 必须在【当前 Batch 范围】（起止章号见用户消息中的「待抽取章节」）之间。本批只阅读了这些章节，输出本批范围之外的章节一律视为幻觉/数据错误，不得输出。
 5. 能力记录中：chapter 是"读者在本批第几章得知这条能力"（知识可用章节）；acquiredChapter 是"故事内获得该能力的章节"（如本批文本提到过去获得，可写更早的章节，但不能超过本批末章）。
 6. 【实体引用契约·重要】当你调用 search_existing_entities 检索到已有实体时，返回结果中的 name 是 canonical name（正式名）。最终 JSON 中引用该实体时：
@@ -39,6 +39,59 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
    - 所有能力一律放入 abilities 数组（系统已有独立的 abilities 结构，见输出格式）；
      若某个能力名确实需要被其他实体引用，最多以 type="concept" 建实体，优先不建。
 
+## MemoryAnchor（记忆锚点）—— 一等目标，优先级不低于普通 Fact
+MemoryAnchor **不是**"重要剧情摘要 / 高重要度事件"。它的准确定义是：
+
+> **用户未来忘记人物名字后，可能会拿来描述这个人物、并借此重新定位他的具体记忆线索。**
+
+判断一条内容是否值得保存为 MemoryAnchor，不要只问"这个情节对剧情重要吗？"，而要问：
+
+> **读者几十章、几百章后忘记这个人的名字时，会不会记得这个画面 / 行为 / 特征，并拿它来问"这个人是谁来着"？**
+
+两个维度必须区分开（都会在输出中记录）：
+- **importance（剧情重要度）**：这个情节对主线有多重要；
+- **memorability（记忆识别度）**：读者会不会凭这条线索想起这个人。
+
+例如「闻人佑一路拉着装满戏台道具的板车」：剧情重要度可能只有 0.2，但作为人物识别线索，memorability 可能高达 0.95。这种线索**必须**保存。
+
+**不要因为以下理由过滤掉高记忆价值的内容**（这些恰恰是 Memory-first 需要的数据）：
+- 「准确率优先」「只抽重要信息」「不要每句话都结构化」「控制输出长度」
+- 下列内容只要对"重新想起这个人"有明显帮助，就应该产出 MemoryAnchor：
+  - 鲜明外貌 / 身体特征（高大、板着脸、戴着红围巾…）
+  - 典型行为 / 动作（一路拉着装满戏台道具的板车…）
+  - 习惯 / 重复特征（一直…、每次都…、平时总是…）
+  - 说话方式 / 口头习惯（沉默寡言、不怎么说话、口头禅…）
+  - 日常职责 / 团队定位（平时负责做饭、管账的…）
+  - 主角第一次见到他时留下的鲜明画面
+  - 与主角鲜明但不一定推动剧情的具体互动（教陈伶【念】…）
+  - 反复出现的物品 / 动作 / 场景
+
+### Character Recall Sweep（输出前必做，仍然在同一次输出中完成）
+对当前批次中出现的**每个重要 Character**（主角、常驻配角、本批有鲜明登场/互动的人物），逐个过一遍清单：
+1. 有没有鲜明外貌 / 身体特征？
+2. 有没有典型行为 / 动作（写清动词+对象+地点，如"拉着板车登上丑峰"）？
+3. 有没有重复习惯 / 固定特征？
+4. 有没有日常职责 / 团队定位？
+5. 有没有明显说话方式 / 口头习惯？
+6. 主角第一次见到他时有什么鲜明画面？
+7. 他和主角有没有非常具体、有画面感的互动（教/学/指点/共事/照顾…）？
+8. 有没有反复出现的物品 / 动作 / 场景？
+9. 读者忘记他的名字后，最可能用什么模糊描述来找他？—— 把这句话（或等价画面）写成 summary。
+
+**同一个人物的多条高识别度线索，请分别产出多条不同 kind 的 MemoryAnchor，不要合并成一条概括**。
+例（同一人物的 3 条独立锚点，全部产出）：
+- visual：「高大沉默，一路拉着装满戏台道具的板车」
+- role：「戏道古藏里平时负责做饭的三师兄」
+- interaction：「负责教陈伶【念】，上课时总是板着脸」
+「教/学/指点/照看/共事」这类与主角的具体互动，是最典型的 interaction 锚点，别漏。
+
+**教学安排也算互动锚点**：即使教学画面还没正式展开，只要本批出现了「某人将负责教/已经教过主角某项基本功」的安排或约定
+（如「明天你先去跟三师兄学【念】」→ 三师兄即闻人佑，负责教【念】），就要为这位教学者产出 interaction 锚点
+（summary 写「负责教陈伶【念】」）——因为读者日后正是会这样回忆他。
+
+MemoryAnchor 的 summary 要**保留用户可能用来回忆的原话感**：具体、有画面、含可检索的动词与名词（拉车/板车/做饭/沉默/板着脸/教念…），
+不要抽象成"他是三师兄，身份重要"这种无法被"拉车/做饭/沉默"定位的概括。
+
 ## 输出格式
 只输出一个 JSON 对象，不要输出任何其他文字：
 - 【硬性】禁止任何解释/思考/检索过程描述（中文的「让我…」「检索结果显示…」，英文的 Let me / Actually / The tool returned 等一律不行），不要用 markdown 代码块围栏（fence）。
@@ -51,19 +104,32 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
   "relations": [{ "fromName": "...", "toName": "...", "type": "...", "detail": "...", "chapter": 1, "confidence": 0.9 }],
   "abilities": [{ "entityName": "...", "name": "...", "category": "ability", "system": "...", "path": "...", "level": "...", "sourceEntity": "...", "acquiredChapter": 1, "summary": "...", "chapter": 1 }],
   "events": [{ "chapter": 1, "participantNames": ["..."], "type": "...", "summary": "...", "importance": 0.5 }],
-  "memoryAnchors": [{ "entityName": "...", "chapter": 1, "summary": "...", "importance": 0.6, "memorability": 0.9, "protagonistRelevance": 0.5 }],
+  "memoryAnchors": [{ "entityName": "...", "chapter": 1, "kind": "visual|behavior|habit|interaction|role|quote", "summary": "...", "importance": 0.6, "memorability": 0.9, "protagonistRelevance": 0.5 }],
   "possibleDuplicates": [{ "entityA": "...", "entityB": "...", "reason": "..." }],
   "conflicts": [{ "kind": "fact_conflict", "entityName": "...", "detail": "...", "chapterA": 1, "chapterB": 2 }],
   "batchSummary": "2~3句话概括本批章节的剧情进展，供下一批抽取参考。"
 }
 
+memoryAnchors 的 kind（记忆线索类型，轻量枚举，从下面选一个）：
+- visual      外貌 / 视觉画面
+- behavior    典型行为 / 动作
+- habit       习惯 / 重复特征
+- interaction 和主角或重要角色的典型互动
+- role        日常职责 / 团队定位
+- quote       说话方式 / 口头特征
+
 ## 输出精简要求（token 预算敏感，硬性要求，违反会导致成本翻倍）
 1. 文本尽量短：value / detail / summary 一句话内（一般 ≤ 20 字），删掉所有修饰词、原因铺垫和原文复述；不要重复读者已经知道的信息。
+   - **例外：MemoryAnchor 的 summary 是"记忆线索"，允许略长（≤ 30 字）以保留用户可能用来回忆的原话感**（如「高大沉默的三师兄，一路拉着装满戏台道具的板车」），但不要写成整句复述。
 2. 可省略字段（省略即用系统默认值，绝不输出 null 或空串 ""）：
    - confidence（省略默认 0.8）、importance（省略默认 0.5）、memorability（省略默认 0.7）、protagonistRelevance（省略默认 0.5）
    - 只在明显偏离默认时才显式给出，其余一律省略。
-3. 数量上限（按本批章节总量控制）：每章 facts ≤ 5 条（同维度事实合并成一条）、events ≤ 3 个、memoryAnchors ≤ 2 条；aliases 只收真正新增且对记忆恢复有用的称呼，杜绝罗列。
+   - **kind 不要省略**：每条 MemoryAnchor 都应给出 kind（这决定了它在召回时如何被解读）。
+3. 数量上限（按本批章节总量控制）：每章 facts ≤ 5 条（同维度事实合并成一条）、events ≤ 3 个、memoryAnchors ≤ 3 条（**角色有高识别度线索时必须达到，没有则 0~1 条，不要硬凑**）；aliases 只收真正新增且对记忆恢复有用的称呼，杜绝罗列。
 4. 已存在实体（通过工具检索命中的）：只输出【本批新增或变化】的信息——新别名、新关系、能力变化、新经历、身份变化；【绝不重复】其身份、性格、背景等已有内容。
+   - **例外（稀疏实体补充）**：工具返回会带该实体的 "facts"/"anchors" 数量。若某个已存在实体 "facts"/"anchors" 很少
+     （例如 anchors:0、facts:0~1），说明它的结构化数据稀疏，本批出现的鲜明识别线索应【补上】——尤其 MemoryAnchor，
+     先按「Character Recall Sweep」执行；不要因为"绝不重复已有内容"而漏掉稀疏实体的 Recall 数据。
 5. batchSummary 一句话（≤ 40 字），说明本批最重要的剧情推进即可。
 6. 没有内容的字段（如新能力无 system/path/level、事件无 participants）一律省略，不要输出 null / "" / [] 等空壳字段。`;
 
