@@ -1,25 +1,34 @@
-// story init：创建项目配置与数据库
-// 核心逻辑抽成 initializeProject / logInitSummary，供 story tui 未初始化时复用
+// story init <小说文件>：创建项目配置与数据库 + 导入整本小说（初始化就必须有小说内容）。
+// 合并了原 story import：init 即建项目即导入；重新初始化/更换小说 = 用新文件再跑一次 story init。
 //
 // V0.1 收口：config 不再保存 maxChapter（全量章节数由 chapters 数据自动决定）。
-// 章节最大值变化不再触发重建 DB——schema 不再把最大章节号编译进去。
 
-import { existsSync } from "node:fs";
-import { initProject, loadConfig, projectDir, dbPath, ensureProjectDir, type StoryConfig } from "../../config.js";
+import { loadConfig, projectDir, dbPath, ensureProjectDir, initProject, type StoryConfig } from "../../config.js";
 import { StoryRepo } from "../../db/repo.js";
 import { log } from "../../logger.js";
 
 export async function cmdInit(args: { positional: string[]; flags: Record<string, string | boolean> }): Promise<number> {
+  const path = args.positional[0];
+  if (!path) {
+    throw new Error("用法：story init <小说文件路径> [--book 书名] [--user-chapter N]");
+  }
   const book = typeof args.flags["--book"] === "string" ? args.flags["--book"] : undefined;
   const userChapter = parseUserChapterFlag(args.flags);
-  const to = args.positional[0];
 
-  const cfg = initializeProject({ book, userChapter });
-  logInitSummary(cfg, to);
-  return 0;
+  // 1) 创建（或复用）项目配置与数据库
+  initializeProject({ book, userChapter });
+
+  // 2) 导入整本小说（清空旧数据 → 写章节 → 设书名；book 由 --book 或文件名决定）
+  const { cmdImport } = await import("./import.js");
+  const code = await cmdImport({ path, book });
+
+  // 3) 摘要（import 已把最终 book 写回 config）
+  const cfg = loadConfig();
+  logInitSummary(cfg, path);
+  return code;
 }
 
-/** 创建（或重载）项目配置与数据库，返回生成的配置。与 story init 行为一致。 */
+/** 创建（或重载）项目配置与数据库，返回生成的配置。 */
 export function initializeProject(
   opts: { book?: string; userChapter?: number } = {},
   cwd = process.cwd()
@@ -32,14 +41,14 @@ export function initializeProject(
   return cfg;
 }
 
-/** 打印 story init 的完成摘要（story tui 未初始化自动初始化后也复用） */
-export function logInitSummary(cfg: StoryConfig, to?: string): void {
+/** 打印 story init 的完成摘要 */
+export function logInitSummary(cfg: StoryConfig, novelPath?: string): void {
   log(`初始化完成：${projectDir()}`);
   log(`  book        = ${cfg.book}`);
   log(`  userChapter = ${cfg.userChapter}（Reader 阅读进度，检索只返回 ≤ 该章的数据；默认第 1 章，保守）`);
   log(`              可用 /chapter <N>（TUI）或 story ask --chapter <N> 调整`);
-  log(`  availableThrough 由 story import 导入的章节数自动决定，无需配置。`);
-  if (to) log(`提示：可以运行 story import ${to} 导入小说。`);
+  if (novelPath) log(`  novel       = ${novelPath}`);
+  log(`  availableThrough 由导入的章节数自动决定，无需配置。`);
 }
 
 export function parseUserChapterFlag(flags: Record<string, string | boolean>): number | undefined {

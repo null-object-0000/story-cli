@@ -13,16 +13,8 @@ export async function cmdBuild(
   const cfg = loadConfig();
   const repo = new StoryRepo(dbPath());
   try {
-    const providerFlag = flags["--provider"];
-    if (providerFlag && providerFlag !== "openai" && providerFlag !== "mock") {
-      throw new Error(`--provider 可选值为 openai|mock，收到：${providerFlag}`);
-    }
-    const { provider, mode } = createProvider(cfg, providerFlag as any | undefined);
-    if (mode === "mock") {
-      warn("未检测到 LLM_BASE_URL/LLM_API_KEY/LLM_MODEL，使用内置 mock 抽取器（仅用于验证管道，不代表真实抽取质量）");
-    } else {
-      log(`LLM: ${provider.name}（model=${(provider as any).modelName ?? "?"}）`);
-    }
+    const provider = createProvider(cfg);
+    log(`LLM: ${provider.name}（model=${(provider as any).modelName ?? "?"}）`);
 
     const fromChapter = parseNum(flags["--from-chapter"]);
     const toChapter = parseNum(flags["--to-chapter"]);
@@ -43,9 +35,6 @@ export async function cmdBuild(
     // 失败即停（默认）：依赖链断裂后不再继续，否则后续实体悬空；--keep-going 显式继续
     const failFast = !(flags["--keep-going"] === true || flags["--keep-going"] === "true");
     if (failFast) log(`失败即停已开启：某批重试后仍失败将停止后续批次（--keep-going 可继续）`);
-    // Agent 化抽取（默认开）：模型自己用工具检索已有实体；--no-agent 回退到"注入实体清单"的单轮抽取
-    const agentExtract = cfg.build?.agentExtract ?? true;
-    if (flags["--no-agent"] === true || flags["--no-agent"] === "true") log(`已关闭 Agent 化抽取（--no-agent），回退到注入式单轮抽取`);
 
     const started = Date.now();
     const res = await runBuild(repo, provider, {
@@ -57,7 +46,6 @@ export async function cmdBuild(
       concurrency,
       autoBatch,
       failFast,
-      agentExtract,
       sessionLog: cfg.build?.sessionLog ?? true,
       maxBatchChapters: cfg.build?.maxBatchChapters,
       perChapterOutputTokens: cfg.build?.perChapterOutputTokens,
@@ -74,6 +62,7 @@ export async function cmdBuild(
     const dur = ((Date.now() - started) / 1000).toFixed(1);
     log("");
     log(`Build complete（本次耗时 ${dur}s）`);
+    log(`Build 索引：.story/logs/build/mainline.jsonl（runId=${res.runId}，每批一行：区间/状态/统计/token/耗时/失败原因 + session 轨迹文件关联）`);
     // ── 可观测性：千字速度 / 千字 token / 缓存命中 / 费用 ──
     try {
       const m = repo.buildMetrics("extract");

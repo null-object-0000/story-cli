@@ -23,8 +23,9 @@ export async function cmdImport(opts: ImportOptions): Promise<number> {
   const cfg = loadConfig();
   const result = parseNovel(text);
 
-  // 书名：--book 显式指定 > 已有非空书名 > 从文件名推断（去扩展名）
-  const book = opts.book?.trim() || cfg.book?.trim() || basename(opts.path).replace(/\.[^.]+$/, "").trim();
+  // 书名：--book 显式指定 > 从文件名推断（去扩展名）。导入 = "这份文件就是这个项目的书"，
+  // 不再沿用旧书名（重新导入/更换小说时书名应跟随新文件）。
+  const book = opts.book?.trim() || basename(opts.path).replace(/\.[^.]+$/, "").trim();
   cfg.book = book;
   saveConfig(cfg);
 

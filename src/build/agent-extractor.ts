@@ -22,8 +22,6 @@ function contentBlocks(blocks: { type: string; text?: string }[]): string {
   return (blocks ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
 }
 
-/** 工具调用轮数上限（1 次批量检索 + 最终输出足够；防止模型循环刷工具） */
-const MAX_TOOL_TURNS = 4;
 /** 单次批量检索的名字上限 */
 const MAX_QUERY_NAMES = 40;
 
@@ -65,7 +63,7 @@ export async function agentExtract(
     .map((t) => `【第${t.chapter}章 ${t.title}】\n${t.text}`)
     .join("\n\n");
 
-  // 校验失败重试：把具体错误 + 定向提示注入本次输出（agent 与注入式共用同一套修复指令）
+  // 校验失败重试：把具体错误 + 定向提示注入本次输出（buildFixInstruction 与 pipeline 校验共用）
   const fixBlock = input.feedback ? buildFixInstruction(input.feedback) + "\n\n" : "";
 
   const userMessage = `${fixBlock}## 此前剧情摘要（供上下文理解，来自上一批抽取）
@@ -76,7 +74,6 @@ ${chapters}
 
 请按系统要求开始：先判断是否需要调用 search_existing_entities，然后输出结构化 JSON。`;
 
-  const toolCallCounter = { count: 0 };
   const agent = new Agent({
     initialState: {
       systemPrompt,
@@ -127,17 +124,6 @@ ${chapters}
     },
     streamFn: streamFn as any,
     toolExecution: "sequential",
-    beforeToolCall: async () => {
-      toolCallCounter.count++;
-      if (toolCallCounter.count > MAX_TOOL_TURNS) {
-        return {
-          block: true,
-          reason: `已达到最大工具调用次数（${MAX_TOOL_TURNS}）。请停止调用工具，直接输出结构化 JSON（检索不到的旧名字视为新实体）。`,
-          terminate: true,
-        };
-      }
-      return undefined;
-    },
   });
 
   // 收集最终文本与真实 usage（多轮工具循环需要累加）
@@ -149,6 +135,7 @@ ${chapters}
   let textStarted = false;
   let turnCount = 0;
   let toolStartAt = 0;
+  let toolCalls = 0;
   agent.subscribe((event: any) => {
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       finalText += event.assistantMessageEvent.delta ?? "";
@@ -162,6 +149,7 @@ ${chapters}
       }
     }
     if (event.type === "tool_execution_start") {
+      toolCalls++;
       const args = JSON.stringify(event.args ?? {});
       toolStartAt = Date.now();
       onActivity?.(`调用工具 ${event.toolName}(${args.slice(0, 120)}...)`);
@@ -227,12 +215,12 @@ ${chapters}
     if (json === null) {
       throw new Error("Agent 输出无法解析为 JSON");
     }
-    if (toolCallCounter.count > 0) {
-      log(`  [${input.range}] agent 工具调用 ${toolCallCounter.count} 次（search_existing_entities）`);
+    if (toolCalls > 0) {
+      log(`  [${input.range}] agent 工具调用 ${toolCalls} 次（search_existing_entities）`);
     }
     sessionLog?.write({
       t: "extract_end", range: input.range, status: "ok",
-      turns: turnCount, toolCalls: toolCallCounter.count,
+      turns: turnCount, toolCalls,
       durationMs: Date.now() - tExtract,
       usage: { inputTokens, cachedTokens, outputTokens },
     });
@@ -247,16 +235,11 @@ ${chapters}
   } catch (e) {
     sessionLog?.write({
       t: "extract_end", range: input.range, status: "error",
-      turns: turnCount, toolCalls: toolCallCounter.count,
+      turns: turnCount, toolCalls,
       durationMs: Date.now() - tExtract,
       usage: { inputTokens, cachedTokens, outputTokens },
       error: e instanceof Error ? e.message : String(e),
     });
     throw e;
   }
-}
-
-/** 某 provider 是否支持 Agent 化抽取 */
-export function supportsAgentExtract(provider: LlmProvider): boolean {
-  return typeof provider.getAgentKit === "function";
 }

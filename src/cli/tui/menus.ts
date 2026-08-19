@@ -33,11 +33,11 @@ export interface MenuDeps {
   toolCtx?: { userChapter: number; focus: { from: number | null; to: number | null } };
   /** 章节焦点引用（与 Agent 工具共享） */
   focus?: { from: number | null; to: number | null };
-  agent?: Agent;
+  agent?: Agent | null;
   /** 界面化命令完成后向聊天区输出（如 /login 保存成功摘要） */
   onNotify?: (text: string) => void;
   /** LLM 配置变更后重建 provider/agent（/login 保存成功后调用；实现见 app.ts reloadLlm） */
-  onLlmChanged?: () => Promise<{ ok: boolean; error?: string; mode?: "llm" | "mock" }>;
+  onLlmChanged?: () => Promise<{ ok: boolean; error?: string; mode?: "llm" }>;
   /** settings/login 打开时仍保留显示：顶栏（书名/进度） */
   topBar: Component;
   /** settings/login 打开时仍保留显示：聊天历史区 */
@@ -88,7 +88,7 @@ const BUILD_NUMERIC_KEYS = new Set([
   "build.perChapterOutputTokens",
   "build.maxBatchChapters",
 ]);
-const BUILD_BOOL_KEYS = new Set(["build.autoBatch", "build.agentExtract", "build.sessionLog"]);
+const BUILD_BOOL_KEYS = new Set(["build.autoBatch", "build.sessionLog"]);
 
 /** 把 /settings 里用户输入写进 cfg（userChapter 即时生效；LLM 连接不走这里，归 /login） */
 function applyChange(deps: MenuDeps, id: string, raw: string): boolean {
@@ -192,7 +192,6 @@ function buildSettingsItems(deps: MenuDeps): SettingItem[] {
     cycle("build.autoBatch", "build · autoBatch", String(cfg.build?.autoBatch ?? false), ["true", "false"], "按上下文自动合并批次"),
     field("build.perChapterOutputTokens", "build · perChapterOutputTokens", "number", String(cfg.build?.perChapterOutputTokens ?? 260), "每章结构化输出的 token 估算（输出预算）"),
     field("build.maxBatchChapters", "build · maxBatchChapters", "number", String(cfg.build?.maxBatchChapters ?? 60), "单批章节数上限"),
-    cycle("build.agentExtract", "build · agentExtract", String(cfg.build?.agentExtract ?? true), ["true", "false"], "Agent 化抽取（false 回退注入实体清单）"),
     cycle("build.sessionLog", "build · sessionLog", String(cfg.build?.sessionLog ?? true), ["true", "false"], "构建会话日志落盘 .story/logs/build/"),
   ];
 }
@@ -378,13 +377,10 @@ class LoginWizard implements Component {
       },
     };
     try {
-      const { provider, mode } = createProvider(merged);
-      if (mode === "mock") {
-        this.status = "⚠️ 连接信息不完整，将使用 mock（离线）";
-      } else {
-        const r = await provider.complete([{ role: "user", content: "你好，请只回复：OK" }], { stream: false, reasoning: "off" });
-        this.status = `✅ 连接正常（${r.model}：${r.content.trim().slice(0, 40) || "（空）"}）`;
-      }
+      // 连接信息不完整 → createProvider 抛错，走 catch
+      const provider = createProvider(merged);
+      const r = await provider.complete([{ role: "user", content: "你好，请只回复：OK" }], { stream: false, reasoning: "off" });
+      this.status = `✅ 连接正常（${r.model}：${r.content.trim().slice(0, 40) || "（空）"}）`;
     } catch (e) {
       this.status = `❌ ${e instanceof Error ? e.message : String(e)}`;
     } finally {
@@ -419,9 +415,7 @@ class LoginWizard implements Component {
     if (this.deps.onLlmChanged) {
       const r = await this.deps.onLlmChanged();
       reloadNote = r.ok
-        ? (r.mode === "llm"
-          ? "> ✅ 已实时生效（provider/agent 已重建，无需重启）。"
-          : "> ⚠️ 已实时生效，但连接信息不完整，当前为 mock（离线）模式；补全后再试 /login。")
+        ? "> ✅ 已实时生效（provider/agent 已重建，无需重启）。"
         : `> ❌ 已保存但重建 LLM 失败：${r.error ?? "未知错误"}（下次启动时按新配置生效）。`;
     }
     const summary = [

@@ -30,7 +30,7 @@ import { StoryRepo } from "../../db/repo.js";
 import { StoryConfig } from "../../config.js";
 import { LlmProvider } from "../../llm/types.js";
 import { createProvider } from "../../llm/index.js";
-import { createStoryAgent, createOfflineAgent } from "../../reader/agent.js";
+import { createStoryAgent } from "../../reader/agent.js";
 import type { NovelToolContext } from "../../reader/tools.js";
 import { runSlashCommand, commandHint, SLASH_COMMANDS, UI_COMMANDS } from "./commands.js";
 import { openBuildView, openLoginView, openSettingsView } from "./menus.js";
@@ -77,12 +77,11 @@ const editorTheme: EditorTheme = {
 // ── 应用 ──────────────────────────────────────────
 
 export interface TuiAppOptions {
-  agent: Agent;
+  /** 配置了 LLM 时非空；未配置（可通过 /login 配置后由 reloadLlm 创建）时为 null */
+  agent: Agent | null;
   repo: StoryRepo;
   cfg: StoryConfig;
   provider: LlmProvider | null;
-  /** 启动时的 --provider 覆盖（reload LLM 时保持生效） */
-  providerOverride?: "openai" | "mock";
   /** 章节焦点引用（与 Agent 工具共享；/chapter 命令会清理它） */
   focus?: { from: number | null; to: number | null };
   /** 工具上下文可变引用（/chapter 切换时同步 userChapter；reload LLM 时用于重建 agent） */
@@ -95,7 +94,7 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
   // agent/provider 可变：/login 保存或 /logout 后重建并换入（LLM 配置实时生效，无需重启）
   let agent = opts.agent;
   let provider = opts.provider;
-  let modelName = (agent.state as any).model?.name ?? provider?.name ?? "unknown";
+  let modelName = (agent as any)?.state?.model?.name ?? provider?.name ?? "未配置";
 
   const terminal = new ProcessTerminal();
   const tui: TUI = new TuiAltScreen(terminal, undefined, undefined, {
@@ -137,10 +136,10 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
   ], { gap: 0, align: "center" });
 
   function updateStatusBar(): void {
-    const msgCount = (agent.state.messages ?? []).length;
+    const msgCount = (agent?.state.messages ?? []).length;
     let totalTokens = 0;
     // 粗略估算：用最后几条消息估算平均 token 数
-    const recentMsgs = (agent.state.messages ?? []).slice(-3);
+    const recentMsgs = (agent?.state.messages ?? []).slice(-3);
     for (const m of recentMsgs) {
       try {
         totalTokens += estimateTokens(JSON.stringify(m));
@@ -157,34 +156,37 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
 
   // 代理事件订阅：每次消息更新后刷新底栏（reload 时重订阅新 agent）
   let statusUnsubscribe: (() => void) | undefined;
-  statusUnsubscribe = agent.subscribe((event) => {
-    if (event.type === "message_end" || event.type === "turn_end" || event.type === "agent_end") {
-      updateStatusBar();
-    }
-  });
+  if (agent) {
+    statusUnsubscribe = agent.subscribe((event) => {
+      if (event.type === "message_end" || event.type === "turn_end" || event.type === "agent_end") {
+        updateStatusBar();
+      }
+    });
+  }
 
   /** LLM 配置变更后重建 provider + agent 并实时换入（/login 保存 / /logout 后调用） */
-  async function reloadLlm(): Promise<{ ok: boolean; error?: string; mode?: "llm" | "mock" }> {
+  async function reloadLlm(): Promise<{ ok: boolean; error?: string; mode?: "llm" }> {
     try {
-      const { provider: newProvider, mode } = createProvider(cfg, opts.providerOverride as "openai" | "mock" | undefined);
+      const newProvider = createProvider(cfg); // 未配置连接 → 抛错
       const kit = newProvider.getAgentKit?.();
-      const newAgent = kit
-        ? createStoryAgent(kit.model, kit.streamFn, repo, cfg, toolCtx)
-        : createOfflineAgent(repo, cfg, toolCtx);
+      const newAgent = kit ? createStoryAgent(kit.model, kit.streamFn, repo, cfg, toolCtx) : null;
       // 停掉旧 agent 在途执行并退订，换入新 agent/provider
-      try { agent.abort(); } catch { /* 无在途任务时忽略 */ }
+      try { agent?.abort(); } catch { /* 无在途任务时忽略 */ }
       if (statusUnsubscribe) statusUnsubscribe();
       agent = newAgent;
       provider = newProvider;
-      modelName = (agent.state as any).model?.name ?? provider?.name ?? "unknown";
-      statusUnsubscribe = agent.subscribe((event) => {
-        if (event.type === "message_end" || event.type === "turn_end" || event.type === "agent_end") {
-          updateStatusBar();
-        }
-      });
+      modelName = (agent as any)?.state?.model?.name ?? provider?.name ?? "未配置";
+      statusUnsubscribe = undefined;
+      if (agent) {
+        statusUnsubscribe = agent.subscribe((event) => {
+          if (event.type === "message_end" || event.type === "turn_end" || event.type === "agent_end") {
+            updateStatusBar();
+          }
+        });
+      }
       updateStatusBar();
       tui.requestRender();
-      return { ok: true, mode };
+      return { ok: true, mode: "llm" };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -280,7 +282,7 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
         return;
       }
       if (cmd === "/exit") {
-        agent.abort();
+        agent?.abort();
         tui.stop();
         process.exit(0);
         return;
@@ -369,6 +371,16 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
     }
 
     // ── Agent 问答 ──
+    if (agent === null) {
+      // 未配置 LLM：提示用 /login 配置（不进入 agent 流程）
+      notifyChat(red("⚠️ LLM 未配置，无法问答。\n\n输入 `/login` 打开引导向导（baseUrl → apiKey → model → thinkingFormat → 测试 → 保存），保存后立即生效。"));
+      busy = false;
+      tui.setFocus(editor);
+      updateStatusBar();
+      tui.requestRender();
+      return;
+    }
+
     const streamSlot = new Container();
     const thinkingLine = new Text(dim("⏳ 思考中..."), 1, 0);
     streamSlot.addChild(thinkingLine);
@@ -524,7 +536,7 @@ export async function runTuiApp(opts: TuiAppOptions): Promise<void> {
 
   tui.addInputListener((data): TuiInputListenerResult => {
     if (matchesKey(data, "ctrl+c")) {
-      agent.abort();
+      agent?.abort();
       tui.stop();
       process.exit(0);
     }

@@ -1,10 +1,8 @@
-// Provider 选择：环境变量（含 .env 文件）优先，其次 story init 时写入 config 的 llm 字段，最后回退 mock。
-// 当 LLM 环境变量齐全时，使用 @earendil-works/pi-ai 作为底座（支持 30+ 提供商）。
-// 否则使用内置 mock 抽取器 + 模板回答器（离线验证管道）。
+// Provider 选择：环境变量（含 .env 文件）优先，其次 config 的 llm 字段。不再有 mock。
+// 未配置任何 LLM 连接时直接抛错（Ask/Build/TUI 都需要真实 LLM）。
 
 import { LlmProvider } from "./types.js";
 import { PiAiProvider } from "./openai.js";
-import { MockProvider } from "./mock.js";
 import { StoryConfig } from "../config.js";
 import { loadEnvFile } from "../env.js";
 
@@ -24,24 +22,20 @@ export function resolveLlmSettings(cfg: StoryConfig, env = process.env): LlmSett
   return { baseUrl, apiKey, model };
 }
 
-export function createProvider(cfg: StoryConfig, override?: "openai" | "mock"): { provider: LlmProvider; mode: "llm" | "mock" } {
-  if (override === "mock") return { provider: new MockProvider(), mode: "mock" };
+/** 创建 LLM provider（OpenAI-compatible，pi-ai 底座）。未配置连接时抛错。 */
+export function createProvider(cfg: StoryConfig): LlmProvider {
   const settings = resolveLlmSettings(cfg);
-  if (override === "openai" && !settings) {
-    throw new Error("选择了 openai provider 但缺少 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 环境变量");
+  if (!settings) {
+    throw new Error(
+      "未配置 LLM 连接（需要 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL：环境变量、.env，或运行 story tui 后在 TUI 内 /login 写入 .story/config.json 的 llm.*）"
+    );
   }
-  if (settings) {
-    return {
-      provider: new PiAiProvider({
-        baseUrl: settings.baseUrl,
-        apiKey: settings.apiKey,
-        model: settings.model,
-        // 用户自配置（config.llm 字段；环境变量仍可覆盖，见 PiAiProvider）
-        thinkingFormat: cfg.llm?.thinkingFormat,
-        extractReasoning: cfg.llm?.extractReasoning,
-      }),
-      mode: "llm",
-    };
-  }
-  return { provider: new MockProvider(), mode: "mock" };
+  return new PiAiProvider({
+    baseUrl: settings.baseUrl,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    // 用户自配置（config.llm 字段；环境变量仍可覆盖，见 PiAiProvider）
+    thinkingFormat: cfg.llm?.thinkingFormat,
+    extractReasoning: cfg.llm?.extractReasoning,
+  });
 }

@@ -5,8 +5,7 @@
 
 import { createModels, createProvider } from "@earendil-works/pi-ai";
 import { stream as piStream, streamSimple as piStreamSimple } from "@earendil-works/pi-ai/api/openai-completions";
-import { ChatMessage, CompletionOptions, CompletionResult, ExtractionInput, ExtractionResult, LlmProvider } from "./types.js";
-import { buildExtractionPrompt } from "../build/prompts.js";
+import { ChatMessage, CompletionOptions, CompletionResult, LlmProvider } from "./types.js";
 import { estimateTokens } from "../util.js";
 
 export interface PiAiOptions {
@@ -233,34 +232,6 @@ export class PiAiProvider implements LlmProvider {
       cachedTokens,
       outputTokens: outputTokens || estimateTokens(content),
       model: modelName,
-    };
-  }
-
-  async extract(input: ExtractionInput): Promise<ExtractionResult> {
-    const { system, user } = buildExtractionPrompt(input);
-    // 抽取思考强度：config.llm.extractReasoning > 环境变量 LLM_EXTRACT_REASONING，默认 off
-    // （对应协议由 config.llm.thinkingFormat > LLM_THINKING_FORMAT > 模型名自动识别，见 deepseekCompat）
-    const reasoning = this.extractReasoning;
-    const result = await this.complete(
-      [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      { temperature: 0.1, jsonMode: true, reasoning }
-    );
-    const json = extractJson(result.content);
-    if (json === null) {
-      throw new Error("模型输出无法解析为 JSON");
-    }
-    // 可观测性：真实 usage（input 不含缓存；总输入 = input + cached）
-    const cached = result.cachedTokens ?? 0;
-    return {
-      output: json,
-      usage: {
-        inputTokens: result.inputTokens + cached,
-        cachedTokens: cached,
-        outputTokens: result.outputTokens,
-      },
     };
   }
 

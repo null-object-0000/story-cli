@@ -6,7 +6,7 @@
 
 ```
 Novel（整本小说）
-   ↓ import（src/cli/commands/import.ts）
+   ↓ init（story init <文件>：initializeProject + cmdImport，src/cli/commands/{init,import}.ts）
 chapters 原文（仅 Build 可读）
    ↓ build（src/build/ 抽取 pipeline）
 Story Data（结构化知识：实体/别名/事实/关系/能力/事件/记忆锚点）
@@ -26,7 +26,7 @@ src/
 │             #   tools）+ 问答管道（answer / context / intent / recall / search）
 ├── db/       # schema + repo（唯一数据访问层；防剧透过滤在这里实现）
 ├── novel/    # 原始小说解析 / 导入
-├── llm/      # 模型适配（openai / mock / mockkb / types）
+├── llm/      # 模型适配（openai / types；pi-ai 底座）
 ├── cli/      # CLI 入口（index）+ 命令（commands/）+ TUI 交互模式（tui/）与提示组件
 ├── config.ts / env.ts / logger.ts / util.ts
 ```

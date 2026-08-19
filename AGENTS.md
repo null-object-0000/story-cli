@@ -12,28 +12,28 @@
 3. **校验不过不写库**：Build 的抽取输出必须先过 `validateExtractionOutput`（含 Batch Range 校验），再进事务。
 4. **数据修正权在 LLM，代码不静默改写输出**：校验失败 → 通过 `feedback` + `buildFixInstruction` 回传给 LLM 让它自己修；**禁止**在代码里悄悄改/丢模型输出（例如把非法 `newEntities.type` 自动改成 concept）。
 5. **能力/技能不是实体类型**：`ENTITY_TYPES` 只允许 `character|organization|location|item|concept`；能力走 `abilities` 数组。
-6. **`import` 会清空全部旧数据**；Build 的 `failed` 批次不会跳过、重跑自动重试；`failFast` 默认停止后续批次。
+6. **`story init <文件>` 会清空全部旧数据**（更换小说 = 用新文件重跑 init）；Build 的 `failed` 批次不会跳过、重跑自动重试；`failFast` 默认停止后续批次。
 
 ## ⚠️ 文档同步约束（本文档的核心目的）
-**凡修改以下四个命令（`init` / `import` / `build` / `ask`）的【行为】或【实现】，必须同步更新文档，否则视为未完成：**
+**凡修改以下三个命令（`init` / `build` / `ask`）的【行为】或【实现】，必须同步更新文档，否则视为未完成：**
+> `story import` 已并入 `story init`（初始化必须有小说内容）；TUI `/import` 复用 `commands/import.ts` 的 `cmdImport`。
 
 - 涉及实现细节（模块/调用链/校验规则/入库流程/工具集/数据表）→ 同步更新 [`docs/commands.md`](docs/commands.md)；
 - 涉及用户可见行为（命令参数、输出、配置项、错误提示）→ 同步更新 [`README.md`](README.md)；
 - 提交说明里注明"文档已同步"（如 `docs: 同步 commands.md 至 X 改动`）。
 
 相关代码范围（触及即触发同步义务）：
-`src/cli/commands/*`（尤其 `init`/`import`/`build`/`ask`/`stats`/`audit`/`tui`）、`src/build/*`、`src/reader/*`、`src/llm/*`、`src/db/*`、`src/novel/*`、`src/config.ts`、`src/cli/tui/commands.ts`（其 `/build /import /status` 等斜杠命令复用上述流程）。
-> 当前命令面（精简后）：CLI = `init import build ask review audit stats tui`（原 `validate` 并入 `stats`、`character` 并入 `ask`、`audit-spoilers` 并入 `audit`）；TUI = `/help /status /settings /login /logout /chapter /build /import /review /audit /clear /exit`（`/status` 合并原 `/context /stats /progress /validate`；`/settings` 为交互式设置菜单、`/login` 为引导式 LLM 连接向导、`/build` 为独立构建面板（进度条随宽度自适应、实时 token 消耗、Esc 取消，聊天区零痕迹；结束后面板显示简洁版、完整批次明细输出到聊天区可滚动查看）——三者都只把输入区替换为面板，顶栏/聊天历史保留可见，期间不能干别的；`/settings` 只含通用配置 reader/build，LLM 连接归 `/login`、凭据清除归 `/logout`；`userChapter` 与 `build.*` 本就读实时配置立即生效，`/login` 保存与 `/logout` 会重建 provider/agent（`reloadLlm`）实时生效，**无需重启 TUI**）。增减命令同样需要同步文档。
+`src/cli/commands/*`（尤其 `init`/`build`/`ask`/`stats`/`audit`/`tui`；`import.ts` 的 `cmdImport` 被 init 与 TUI `/import` 复用，改动同样触发同步义务）、`src/build/*`、`src/reader/*`、`src/llm/*`、`src/db/*`、`src/novel/*`、`src/config.ts`、`src/cli/tui/commands.ts`（其 `/build /import /status` 等斜杠命令复用上述流程）。
+> 当前命令面（精简后）：CLI = `init build ask review audit stats tui web`（`story init <文件>` 合并原 `import`，初始化即导入；原 `validate` 并入 `stats`、`character` 并入 `ask`、`audit-spoilers` 并入 `audit`；`story web` 启动本地小说百科网站——`src/web/server.ts` 只读结构化知识、按 `userChapter` 在数据访问层过滤防剧透、不展示正文）；TUI = `/status /settings /login /logout /chapter /build /import /review /audit /clear /exit`（无 `/help`——命令清单由输入 `/` 的自动补全展示；`/status` 合并原 `/context /stats /progress /validate`；`/settings` 为交互式设置菜单、`/login` 为引导式 LLM 连接向导、`/build` 为独立构建面板（进度条随宽度自适应、实时 token 消耗、Esc 取消，聊天区零痕迹；结束后面板显示简洁版、完整批次明细输出到聊天区可滚动查看）——三者都只把输入区替换为面板，顶栏/聊天历史保留可见，期间不能干别的；`/settings` 只含通用配置 reader/build，LLM 连接归 `/login`、凭据清除归 `/logout`；`userChapter` 与 `build.*` 本就读实时配置立即生效，`/login` 保存与 `/logout` 会重建 provider/agent（`reloadLlm`）实时生效，**无需重启 TUI**）。增减命令同样需要同步文档。
 
 ## 常用命令
 ```bash
 npm run build   # tsc 编译（改完代码必须保证通过）
 npm run dev     # 编译 + 打开 TUI
-node dist/scripts/e2e.js   # 端到端验证（见下方环境注意）
-node dist/scripts/make-fixture.js   # 生成合成测试小说
+node dist/scripts/e2e.js   # 端到端验证（纯 Node 分支，无需 LLM）
 ```
-> package.json 只保留 `build`/`dev` 两个脚本；`fixture`/`e2e` 命令入口已移除，源码保留在 `scripts/`。
+> package.json 只保留 `build`/`dev` 两个脚本；`e2e` 命令入口已移除，源码保留在 `scripts/`。**不再有 mock**：Ask/Build/TUI 都需要真实 LLM（`--provider mock`、离线 agent、模板回答器、make-fixture 均已移除）。
 
 ## 环境 / 验证注意
-- 本仓库在受限文件沙箱下运行时，e2e 中**通过 `execSync` 派生 CLI 子进程并捕获输出**的用例会被沙箱以 `EPERM` 拦截（管道 stdio 限制），属环境限制、非代码回归。改动后至少保证：`tsc` 通过 + e2e 的纯 Node 分支用例（抽取校验/DB 层/静态检查）通过。
-- LLM 连接优先取环境变量 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL`，其次 `.story/config.json` 的 `llm.*`；没有真实 LLM 时用 `--provider mock` 离线验证管道。
+- 改动后至少保证：`tsc` 通过 + `node dist/scripts/e2e.js`（抽取校验 / DB 层不变式 / Reader-TUI 原文隔离静态检查）通过。
+- LLM 连接：环境变量 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL`（含 .env）优先，其次 `.story/config.json` 的 `llm.*`（可在 TUI 内 `/login` 写入）；未配置时 Ask/Build 报错，TUI 可进入后用 `/login` 配置。

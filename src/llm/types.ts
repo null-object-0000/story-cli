@@ -46,19 +46,11 @@ export interface ChapterSlice {
   text: string;
 }
 
-export interface KnownEntityDigest {
-  id: string;
-  name: string;
-  type: string;
-}
-
 export interface ExtractionInput {
   range: string;
   startChapter: number;
   endChapter: number;
   texts: ChapterSlice[];
-  knownEntities: KnownEntityDigest[];
-  aliases: { alias: string; entityId: string; entityName: string }[];
   previousSummary: string | null;
   /**
    * 上一次输出的校验错误反馈（自动重试修复用）。
@@ -78,8 +70,6 @@ export interface LlmCapabilities {
 
 export interface LlmProvider {
   readonly name: string;
-  /** 抽取：返回结构化输出 + 真实 usage（未校验的原始 JSON 对象）；失败抛错 */
-  extract(input: ExtractionInput): Promise<ExtractionResult>;
   /** 通用对话补全（默认流式，流式时通过 opts.onToken 回调增量文本） */
   complete(messages: ChatMessage[], opts?: CompletionOptions): Promise<CompletionResult>;
   /** 模型能力（用于自适应批次大小）；不支持时省略 */

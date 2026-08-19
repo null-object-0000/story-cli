@@ -53,3 +53,34 @@ export class BuildSessionLogger {
     }
   }
 }
+
+/**
+ * Build 主线/索引日志：跨多次构建的追加式 JSONL（.story/logs/build/mainline.jsonl）。
+ * 一行一个事件：
+ *   - run_start  一次构建开始（provider/model/范围/批量策略/断点跳过数）
+ *   - batch      每批结果（区间/状态/产出统计/token/耗时/失败原因/本批摘要 + 完整 session 轨迹文件路径）
+ *   - run_end    一次构建结束（总耗时/成败统计/token 合计）
+ * 作用：把全书每批 build 情况串成一根主线，配 session-*.jsonl 完整轨迹，支撑整本书构建完后的回溯、排查与优化。
+ */
+export class BuildMainlineLogger {
+  private file: string;
+
+  constructor(projectRoot: string, subdir = ".story/logs/build") {
+    const dir = join(projectRoot, subdir);
+    mkdirSync(dir, { recursive: true });
+    this.file = join(dir, "mainline.jsonl");
+  }
+
+  get path(): string {
+    return this.file;
+  }
+
+  /** 追加一行事件（ts 自动补 ISO；日志失败不影响构建） */
+  write(entry: Record<string, unknown>): void {
+    try {
+      appendFileSync(this.file, JSON.stringify({ ...entry, ts: entry.ts ?? new Date().toISOString() }) + "\n");
+    } catch {
+      // 忽略
+    }
+  }
+}

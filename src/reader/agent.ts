@@ -4,7 +4,6 @@
 //   2. createAgent() — 创建 Agent 实例供 TUI 交互界面使用
 
 import { Agent } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { StoryRepo } from "../db/repo.js";
 import { StoryConfig } from "../config.js";
 import { LlmProvider } from "../llm/types.js";
@@ -190,66 +189,4 @@ export function createStoryAgent(
   });
 
   return agent;
-}
-
-/**
- * 离线 Agent：未配置真实 LLM（离线/mock 模式）时仍可启动 TUI。
- * streamFn 返回固定的「未配置 LLM」提示文本，不做任何工具调用；
- * 斜杠命令（/stats、/context、/chapter 等）不依赖 Agent，照常可用。
- */
-export function createOfflineAgent(repo: StoryRepo, cfg: StoryConfig, toolCtx: NovelToolContext): Agent {
-  return createStoryAgent(offlineModel(), offlineStreamFn, repo, cfg, toolCtx);
-}
-
-/** 离线模式下问答返回的提示文本 */
-export const OFFLINE_ANSWER = [
-  "当前未配置真实 LLM，无法进行 Agent 问答。",
-  "",
-  "在 TUI 内直接配置（无需手动改文件）：",
-  "  输入 /login 打开引导向导：baseUrl → apiKey → model → 测试连接 → 保存",
-  "",
-  "保存后重新运行 story tui（或 npm run dev）即可启用完整问答。",
-  "",
-  "不依赖 LLM 的命令仍可用：/status、/chapter、/review、/audit、/help。",
-].join("\n");
-
-function offlineModel(): unknown {
-  return {
-    id: "offline",
-    name: "offline (mock)",
-    api: "openai-completions",
-    provider: "offline",
-  };
-}
-
-/** 生成一条合法的 AssistantMessageEventStream（start → text_* → done），内容是离线提示 */
-function offlineStreamFn(model: unknown, _context: unknown, _opts?: unknown): unknown {
-  // 内部 mock，事件结构只需满足 pi-agent-core 的读取要求即可
-  const stream: any = createAssistantMessageEventStream();
-  const text = OFFLINE_ANSWER;
-  const id = (model as any)?.id ?? "offline";
-  const make = (t: string) => ({
-    role: "assistant",
-    content: [{ type: "text", text: t }],
-    api: "openai-completions",
-    provider: "offline",
-    model: id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: "stop",
-    timestamp: Date.now(),
-  });
-  const empty = make("");
-  stream.push({ type: "start", partial: empty });
-  stream.push({ type: "text_start", contentIndex: 0, partial: empty });
-  stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: make(text) });
-  stream.push({ type: "text_end", contentIndex: 0, content: text, partial: make(text) });
-  stream.push({ type: "done", reason: "stop", message: make(text) });
-  return stream;
 }

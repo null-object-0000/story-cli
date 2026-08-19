@@ -7,11 +7,6 @@
 //     最终 JSON 必须使用该 canonical name 作为 entityName/fromName/toName，
 //     不要用当前文本中的别名再创建实体（别名解析由工具完成）。
 
-import { ExtractionInput } from "../llm/types.js";
-
-const START_TOKEN = "__START_CHAPTER__";
-const END_TOKEN = "__END_CHAPTER__";
-
 export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆助手"的【结构化数据抽取器】。
 
 你的任务是：阅读给定的小说章节文本，抽取对"读者恢复剧情记忆"有用的结构化数据。
@@ -66,46 +61,8 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个长篇小说"阅读记忆�
 5. batchSummary 一句话（≤ 40 字），说明本批最重要的剧情推进即可。
 6. 没有内容的字段（如新能力无 system/path/level、事件无 participants）一律省略，不要输出 null / "" / [] 等空壳字段。`;
 
-export function buildExtractionPrompt(input: ExtractionInput): { system: string; user: string } {
-  const system = EXTRACTION_SYSTEM_PROMPT.replaceAll(START_TOKEN, String(input.startChapter)).replaceAll(END_TOKEN, String(input.endChapter));
-
-  // 校验失败重试：把具体错误 + 定向提示注入本次输出（让重试真正"会修"，而不是盲重跑）
-  const fixBlock = input.feedback ? `${buildFixInstruction(input.feedback)}\n\n` : "";
-
-  const knownEntities = input.knownEntities
-    .slice(0, 800)
-    .map((e) => `${e.name}（id=${e.id}，type=${e.type}）`)
-    .join("，");
-
-  const aliases = input.aliases
-    .slice(0, 2000)
-    .map((a) => `${a.alias} → ${a.entityName}`)
-    .join("；");
-
-  const chapters = input.texts
-    .map((t) => `【第${t.chapter}章 ${t.title}】\n${t.text.slice(0, 8000)}`)
-    .join("\n\n");
-
-  const user = `${fixBlock}## 已存在的实体（canonical name 用 name 字段；最终 JSON 引用时请用 canonical name，不要用别名再建实体）
-${knownEntities || "（暂无）"}
-
-## 已存在的别名映射
-${aliases || "（暂无）"}
-
-## 此前剧情摘要（供上下文理解）
-${input.previousSummary || "（无）"}
-
-## 待抽取章节（第 ${input.startChapter}~${input.endChapter} 章）
-${chapters}
-
-请严格按系统要求输出 JSON。`;
-
-  return { system, user };
-}
-
 /**
- * 校验失败后的修复指令：把校验器报出的具体错误反馈给模型，并附定向提示。
- * 供 Agent 化抽取（agent-extractor.ts）与注入式抽取（buildExtractionPrompt）共用。
+ * 校验失败后的修复指令：把校验器报出的具体错误反馈给模型，并附定向提示（Agent 化抽取共用）。
  */
 export function buildFixInstruction(feedback: string): string {
   const hint = feedback.includes("newEntities.type 非法")

@@ -1,6 +1,5 @@
-// TUI 斜杠命令处理器：/build, /import, /status, /review, /audit, /help
-// 像 Claude Code 一样，在输入框输入 /xxx 执行运维操作，结果渲染到聊天区
-// 命令注册表 SLASH_COMMANDS 同时驱动 pi-tui Editor 的斜杠命令自动补全
+// TUI 斜杠命令处理器：/build, /import, /status, /review, /audit, /settings, /login, /logout
+// 像 Claude Code 一样，在输入框输入 /xxx 执行运维操作；命令名/说明由 SLASH_COMMANDS 驱动 `/` 自动补全
 
 import { StoryRepo } from "../../db/repo.js";
 import { StoryConfig, saveConfig } from "../../config.js";
@@ -14,7 +13,7 @@ export interface TuiUi {
   openSettings(): void;
   openLogin(): void;
   /** LLM 配置变更后重建 provider/agent（/login 保存 / /logout 后调用，实时生效） */
-  reloadLlm?: () => Promise<{ ok: boolean; error?: string; mode?: "llm" | "mock" }>;
+  reloadLlm?: () => Promise<{ ok: boolean; error?: string; mode?: "llm" }>;
   /** /build：打开构建面板（返回控制器；Esc 触发 onCancel 取消构建） */
   openBuild?: (hooks: { onCancel: () => void }) => BuildPanelHandle;
 }
@@ -27,8 +26,8 @@ export interface CommandContext {
   focus?: { from: number | null; to: number | null };
   /** 工具上下文可变引用（/chapter 切换时同步 userChapter，使 get_progress 返回新值） */
   toolCtx?: { userChapter: number; focus: { from: number | null; to: number | null } };
-  /** Agent 实例（/chapter 切换章节时 reset 清空消息历史，防止旧数据泄露） */
-  agent?: Agent;
+  /** Agent 实例（/chapter 切换章节时 reset 清空消息历史，防止旧数据泄露；未配置 LLM 时为 null/undefined） */
+  agent?: Agent | null;
   /** 进度回调（build 等长任务每批完成时触发，TUI 实时更新） */
   onProgress?: (text: string) => void;
   /** 向聊天区输出（如 build 完成后把完整结果输出到可滚动的聊天记录） */
@@ -51,13 +50,12 @@ export const UI_COMMANDS: ReadonlySet<string> = new Set(["settings", "login", "b
 
 /** 命令注册表：name/description 用于 pi-tui 输入 `/` 时的补全菜单 */
 export const SLASH_COMMANDS: SlashCommand[] = [
-  { name: "help", description: "显示所有可用命令" },
   { name: "status", description: "工作区状态：数据量/成本/构建性能/进度/完整性校验" },
   { name: "settings", description: "交互式设置菜单（↑/↓ + Enter/Space 修改）" },
   { name: "login", description: "引导式配置 LLM 连接（baseUrl → apiKey → model → 测试）" },
   { name: "logout", description: "清除已保存的 LLM 连接凭据（baseUrl/apiKey/model）" },
   { name: "chapter", description: "查看/切换当前阅读进度（Ask 防剧透边界）", argumentHint: "<章节号>" },
-  { name: "build", description: "构建知识库（Agent 化抽取，失败即停）", argumentHint: "[--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]" },
+  { name: "build", description: "构建知识库（Agent 化抽取，失败即停）", argumentHint: "[--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--keep-going]" },
   { name: "import", description: "导入小说文件（会清空现有数据）", argumentHint: "<文件路径>" },
   { name: "review", description: "审核疑似重复/低置信度数据", argumentHint: "[--auto]" },
   { name: "audit", description: "防剧透审计" },
@@ -121,31 +119,6 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
   const { repo, cfg, provider } = ctx;
 
   switch (cmd) {
-    // ── 帮助 ──
-    case "help":
-      return {
-        text: [
-          "## 可用命令",
-          "",
-          "| 命令 | 说明 |",
-          "|------|------|",
-          "| `/help` | 显示此帮助 |",
-          "| `/status` | 工作区状态：数据量 / LLM 成本 / 构建性能 / 处理进度 / 完整性校验（合并了原 /context /stats /progress /validate） |",
-          "| `/settings` | 交互式设置菜单（↑/↓ 选择 · Enter/Space 修改 · `/` 搜索 · Esc 关闭） |",
-          "| `/login` | 引导式配置 LLM 连接（baseUrl → apiKey → model → 测试 → 保存） |",
-          "| `/logout` | 清除已保存的 LLM 连接凭据 |",
-          "| `/chapter <N>` | 切换当前阅读进度（Ask 防剧透边界，默认第 1 章） |",
-          "| `/build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going]` | 构建知识库（Agent 化抽取：模型自己检索已有实体；--no-agent 回退注入式，--keep-going 失败后继续） |",
-          "| `/import <path>` | 导入小说文件（注意：会清空现有数据） |",
-          "| `/review [--auto]` | 审核疑似重复/低置信度数据 |",
-          "| `/audit` | 防剧透审计 |",
-          "| `/clear` | 清空聊天历史 |",
-          "| `/exit` | 退出 |",
-          "",
-          "普通文本直接进入 Agent 问答模式。",
-        ].join("\n"),
-      };
-
     // ── 工作区状态（合并原 /context /stats /progress /validate） ──
     case "status": {
       const chapters = repo.countChapters();
@@ -361,7 +334,6 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
             concurrency: 1,
             autoBatch: flags["--auto-batch"] === true || (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? false)),
             failFast: !(flags["--keep-going"] === true),
-            agentExtract: (cfg.build?.agentExtract ?? true) === true && flags["--no-agent"] !== true,
             sessionLog: cfg.build?.sessionLog ?? true,
             maxBatchChapters: cfg.build?.maxBatchChapters,
             perChapterOutputTokens: cfg.build?.perChapterOutputTokens,
@@ -395,6 +367,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
         if (result.skipped > 0) {
           summary.push(`\n> 已跳过 ${result.skipped} 个已完成批次（使用 \`--force\` 可强制重跑）`);
         }
+        summary.push(`\n> 索引日志：\`.story/logs/build/mainline.jsonl\`（runId=\`${result.runId}\`，每批一行可回溯）`);
         // 面板显示简洁版（避免长表格溢出），完整结果进聊天区可滚动查看
         const panelText = [
           `## Build 完成`,
@@ -496,7 +469,7 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
       const note = had
         ? (r
           ? (r.ok
-            ? "> ✅ 已实时生效：当前回到离线/mock 模式，无需重启。"
+            ? "> ✅ 已实时生效：连接已清除，当前为「未配置」状态（Ask/Build 需先 /login）。"
             : `> ❌ 已清除但重建失败：${r.error ?? "未知错误"}（下次启动时按新配置生效）。`)
           : "> 已清除（需重启 TUI 后按新配置重建）。")
         : "";
@@ -513,9 +486,9 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
   }
 }
 
-/** 命令列表提示（用于未知命令） */
+/** 命令列表提示（用于未知命令；命令清单由 `/` 自动补全展示） */
 export function commandHint(): string {
-  return "可用命令：`/help`、`/status`、`/settings`、`/login`、`/logout`、`/chapter`、`/build`、`/import`、`/review`、`/audit`、`/clear`、`/exit`";
+  return "输入 `/` 可查看并补全所有可用命令（status / settings / login / logout / chapter / build / import / review / audit / clear / exit）。";
 }
 
 /** 批次区间格式化："38-38" → "第 38 章"；"1-26" → "第 1~26 章" */

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StoryPack 小说百科</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <a class="brand" href="#/">
+      <span class="logo">📖</span>
+      <span id="book-title">小说百科</span>
+    </a>
+    <form id="search-form" autocomplete="off" role="search">
+      <input id="search-input" type="search" placeholder="搜索角色 / 组织 / 地点 / 能力…" aria-label="搜索" />
+    </form>
+    <div id="progress" title="你读到第几章？未读到的内容——包括人物本身——不会显示">
+      <span class="progress-label">读到第 <b id="chapter-label">1</b> 章</span>
+      <input id="chapter-slider" type="range" min="1" max="1" value="1" step="1" />
+      <span id="progress-max"></span>
+    </div>
+  </header>
+
+  <main id="app">
+    <div id="loading"><span class="spinner"></span> 加载中…</div>
+  </main>
+
+  <footer id="foot"></footer>
+  <script src="/app.js"></script>
+</body>
+</html>

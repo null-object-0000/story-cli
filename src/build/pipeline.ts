@@ -6,8 +6,8 @@ import { StoryRepo } from "../db/repo.js";
 import { LlmProvider, ChapterSlice, ExtractionInput } from "../llm/types.js";
 import { validateExtractionOutput, buildValidationFeedback, ValidationError, ExtractionBundle } from "./validation.js";
 import { aliasClashToDuplicate } from "./resolution.js";
-import { agentExtract, supportsAgentExtract } from "./agent-extractor.js";
-import { BuildSessionLogger } from "./session-log.js";
+import { agentExtract } from "./agent-extractor.js";
+import { BuildSessionLogger, BuildMainlineLogger } from "./session-log.js";
 import { log, warn } from "../logger.js";
 import { clampInt, estimateTokens, sleep } from "../util.js";
 
@@ -36,9 +36,6 @@ export interface BuildOptions {
    * 默认 true（停止并保留未执行批次）；--keep-going 可显式继续。
    */
   failFast?: boolean;
-  /** Agent 化抽取：基于 pi-agent-core 的 Agent + search_existing_entities 工具，
-   *  由模型自己决定检索哪些已有实体（不再全量注入实体清单）。默认 true（受 provider 支持性约束）。 */
-  agentExtract?: boolean;
   /** 会话日志：每批把完整 prompt/回复/工具轨迹落盘为 JSONL（.story/logs/build/），
    *  供性能与准确度分析。默认 true（agent 抽取时生效）。 */
   sessionLog?: boolean;
@@ -89,6 +86,8 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   processed: BatchResult[];
   skipped: number;
   failed: number;
+  /** 本次构建的 runId（与 mainline.jsonl 索引日志对应） */
+  runId: string;
 }> {
   const batchSize = Math.max(1, opts.batchSize ?? 1);
   const retries = Math.max(0, opts.retries ?? 2);
@@ -200,6 +199,23 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
   const totalChapters = pending.reduce((s, r) => s + (r.end - r.start + 1), 0);
   /** 正在处理的批次（running 状态，实时显示） */
   const running: string[] = [];
+
+  // ── 主线/索引日志（.story/logs/build/mainline.jsonl）：串联本次构建每一批 build 情况 ──
+  const runId = new Date().toISOString().replace(/[:.]/g, "-");
+  const mainline = new BuildMainlineLogger(process.cwd());
+  const runStart = Date.now();
+  const runTokens = { input: 0, cached: 0, output: 0 };
+  let runChars = 0;
+  mainline.write({
+    kind: "run_start", runId,
+    provider: provider.name,
+    model: (provider as any).modelName ?? provider.name,
+    fromChapter, toChapter,
+    batchSize, autoBatch, failFast: opts.failFast ?? true, retries,
+    ranges: ranges.length, pending: pending.length, skipped,
+    sessionLogDir: ".story/logs/build",
+  });
+
   const zeroResult = (range: string, status: "done" | "failed"): BatchResult => ({ range, status, ...zeroCounts() });
   const spanOf = (range: string): number => {
     const [a, b] = range.split("-").map(Number);
@@ -232,10 +248,40 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     const key = `${r.start}-${r.end}`;
     running.push(key);
     let statusLine: string | undefined;
-    const bump = (line?: string): void => {
-      if (line !== undefined) statusLine = line;
-      emitProgress(key, "running", zeroResult(key, "done"), statusLine);
+
+    /** 本批索引行：串联区间/状态/产出统计/token/耗时/失败原因与完整 session 轨迹文件（mainline.jsonl） */
+    const writeIndex = (br: BatchResult, info: {
+      usage: { input: number; cached: number; output: number };
+      chars: number;
+      durationMs: number;
+      attempts: number;
+      summary: string | null;
+      sessionLog: string | null;
+    }): void => {
+      mainline.write({
+        kind: "batch", runId,
+        range: key, startChapter: r.start, endChapter: r.end, nChapters: r.end - r.start + 1,
+        status: br.status,
+        attempts: info.attempts,
+        counts: {
+          newEntities: br.newEntities, entityUpdates: br.entityUpdates,
+          aliases: br.aliases, facts: br.facts, relations: br.relations,
+          abilities: br.abilities, events: br.events,
+          memoryAnchors: br.memoryAnchors, duplicates: br.duplicates,
+        },
+        tokens: info.usage,
+        chars: info.chars,
+        durationMs: info.durationMs,
+        summary: info.summary,
+        error: br.error ?? null,
+        sessionLog: info.sessionLog,
+      });
+      runTokens.input += info.usage.input;
+      runTokens.cached += info.usage.cached;
+      runTokens.output += info.usage.output;
+      runChars += info.chars;
     };
+
     emitProgress(key, "running", zeroResult(key, "done"), "准备批次...");
     log(`[${key}] extracting...`);
     // 批内每章文本预算（输入预算均分；中文 ~0.6~0.7 token/字，保守按 0.6 换算字符）
@@ -255,23 +301,22 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       const br: BatchResult = { range: key, status: "failed", error: "无章节文本", ...zero };
       processed.push(br);
       running.splice(running.indexOf(key), 1);
+      writeIndex(br, { usage: { input: 0, cached: 0, output: 0 }, chars: 0, durationMs: 0, attempts: 1, summary: null, sessionLog: null });
       emitProgress(key, "failed", br);
       return;
     }
 
-    // 已有实体索引 —— 仅非 agent 抽取的回退路径需要（agent 化抽取由模型自己用工具检索）
-    const agentMode = (opts.agentExtract ?? true) && supportsAgentExtract(provider);
-    const rel = agentMode ? { knownEntities: [], aliases: [] } : buildRelevantContext(repo, texts);
-    const knownEntities = rel.knownEntities;
-    const aliases = rel.aliases;
+    // 只支持 Agent 化抽取（模型用 search_existing_entities 工具按需检索已有实体）；注入式已移除
+    if (!provider.getAgentKit?.()) {
+      throw new Error("当前 provider 不支持 Agent 化抽取（缺少 getAgentKit）");
+    }
 
-    // 会话日志：agent 抽取时把本批完整轨迹落盘（.story/logs/build/）
+    // 会话日志：把本批完整轨迹落盘（.story/logs/build/）
     let batchSessionLog: BuildSessionLogger | null = null;
-    if (agentMode && (opts.sessionLog ?? true)) {
+    if (opts.sessionLog ?? true) {
       batchSessionLog = new BuildSessionLogger(process.cwd());
       batchSessionLog.open(key);
     }
-    // agentExtract 的 sessionLog 参数只接受可选对象
     const sessionLogForAgent = batchSessionLog ?? undefined;
 
     // 滚动摘要
@@ -282,8 +327,6 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       startChapter: r.start,
       endChapter: r.end,
       texts,
-      knownEntities,
-      aliases,
       previousSummary,
     };
 
@@ -304,15 +347,13 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         await sleep(500 * attempt);
       }
       try {
-        const res = agentMode
-          ? await agentExtract(provider, repo, { ...input, feedback }, {
-              onActivity: (line) => {
-                statusLine = line;
-                emitProgress(key, "running", zeroResult(key, "done"), statusLine);
-              },
-              sessionLog: sessionLogForAgent,
-            })
-          : (bump("等待 LLM 响应（流式生成中）..."), await provider.extract({ ...input, feedback }));
+        const res = await agentExtract(provider, repo, { ...input, feedback }, {
+          onActivity: (line) => {
+            statusLine = line;
+            emitProgress(key, "running", zeroResult(key, "done"), statusLine);
+          },
+          sessionLog: sessionLogForAgent,
+        });
         usage = res.usage;
         rawOutput = res.output;
         // 设计原则：校验错误不在这里"悄悄修数据"，而是由反馈循环回传给 LLM，
@@ -353,6 +394,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       const br: BatchResult = { range: key, status: "failed", error: lastError, ...zeroCounts() };
       processed.push(br);
       running.splice(running.indexOf(key), 1);
+      writeIndex(br, { usage: { input: usage.inputTokens, cached: usage.cachedTokens, output: usage.outputTokens }, chars: batchChars, durationMs, attempts: attempt + 1, summary: null, sessionLog: batchSessionLog?.path ?? null });
       emitProgress(key, "failed", br);
       return;
     }
@@ -439,6 +481,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
       const br: BatchResult = { range: key, status: "failed", error: msg, ...zeroCounts() };
       processed.push(br);
       running.splice(running.indexOf(key), 1);
+      writeIndex(br, { usage: { input: usage.inputTokens, cached: usage.cachedTokens, output: usage.outputTokens }, chars: batchChars, durationMs, attempts: attempt + 1, summary: bundle?.batchSummary ?? null, sessionLog: batchSessionLog?.path ?? null });
       emitProgress(key, "failed", br);
       return;
     }
@@ -462,11 +505,12 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     const br: BatchResult = { range: key, status: "done", ...counts, entityUpdates };
     processed.push(br);
     running.splice(running.indexOf(key), 1);
+    writeIndex(br, { usage: { input: usage.inputTokens, cached: usage.cachedTokens, output: usage.outputTokens }, chars: batchChars, durationMs, attempts: attempt + 1, summary: bundle.batchSummary ?? null, sessionLog: batchSessionLog?.path ?? null });
     emitProgress(key, "done", br);
   }
 
   // ── 执行：严格串行（批间存在强依赖，禁止并发） ──
-  // 依赖链：批 N+1 的实体注入（buildRelevantContext）依赖批 N 已入库的实体；
+  // 依赖链：批 N+1 的抽取（search_existing_entities 检索 + 滚动摘要）依赖批 N 已入库的实体；
   //         滚动摘要（rollPreviousSummary）依赖前一批的 batchSummary；
   //         并行会让后一批看不到前一批刚创建的实体 → 重复建实体、摘要错乱。
   // 因此并发参数不再生效：批内仍可合并多章（同一 prompt 顺序阅读无依赖问题），
@@ -495,39 +539,19 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     }
   }
 
-  return { processed, skipped, failed };
-}
+  // ── 主线索引 run_end：本次构建汇总 ──
+  const done = processed.filter((p) => p.status === "done").length;
+  const failedCount = processed.filter((p) => p.status === "failed").length;
+  mainline.write({
+    kind: "run_end", runId,
+    durationMs: Date.now() - runStart,
+    batches: processed.length, done, failed: failedCount, skipped,
+    aborted: opts.signal?.aborted ?? false,
+    tokens: runTokens,
+    chars: runChars,
+  });
 
-/** 收集本批文本中"被提到"的实体及其别名。
- *  借鉴 Agent 的按需检索思想：不把全部已知实体塞进 prompt（实体多了会占满上下文），
- *  只注入本批章节文本实际出现的实体，让 LLM 复用它们的 entityId，避免重复建实体。 */
-function buildRelevantContext(repo: StoryRepo, texts: ChapterSlice[]): {
-  knownEntities: { id: string; name: string; type: string }[];
-  aliases: { alias: string; entityId: string; entityName: string }[];
-} {
-  const joined = texts.map((t) => t.text).join("\n");
-  if (!joined) return { knownEntities: [], aliases: [] };
-  const allEntities = repo.listEntities();
-  const allAliases = repo.listAliases();
-  const entityById = new Map(allEntities.map((e) => [e.id, e]));
-  const mentioned = new Map<string, { id: string; name: string; type: string }>();
-  for (const e of allEntities) {
-    if (e.name.length >= 2 && joined.includes(e.name)) {
-      mentioned.set(e.id, { id: e.id, name: e.name, type: e.type });
-    }
-  }
-  for (const a of allAliases) {
-    if (a.alias.length >= 2 && joined.includes(a.alias)) {
-      const e = entityById.get(a.entity_id);
-      if (e) mentioned.set(e.id, { id: e.id, name: e.name, type: e.type });
-    }
-  }
-  return {
-    knownEntities: [...mentioned.values()],
-    aliases: allAliases
-      .filter((a) => mentioned.has(a.entity_id))
-      .map((a) => ({ alias: a.alias, entityId: a.entity_id, entityName: entityById.get(a.entity_id)?.name ?? "" })),
-  };
+  return { processed, skipped, failed, runId };
 }
 
 function zeroCounts() {

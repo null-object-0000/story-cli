@@ -21,7 +21,7 @@ function parseArgs(argv: string[]): { command: string; positional: string[]; fla
   const flags: Record<string, string | boolean> = {};
   const expectVal = new Set<string>([
     "--from-chapter", "--to-chapter", "--batch-size", "--retries",
-    "--provider", "--model", "--book", "--user-chapter", "--chapter", "--parallel",
+    "--model", "--book", "--user-chapter", "--chapter", "--parallel", "--port", "--host",
   ]);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
@@ -48,22 +48,14 @@ const commands: Record<string, CommandEntry> = {
       const { cmdInit } = await import("./commands/init.js");
       return cmdInit(args);
     },
-    help: "story init [--book 书名] [--user-chapter N]     创建项目（默认 userChapter=1）",
-  },
-  import: {
-    run: async (args) => {
-      const { cmdImport } = await import("./commands/import.js");
-      if (!args.positional.length) throw new Error("用法：story import <小说文件路径>");
-      return cmdImport({ path: args.positional[0], book: args.flags["--book"] as string | undefined });
-    },
-    help: "story import <文件路径>   导入整本小说（识别到的所有章节；availableThrough 自动决定）",
+    help: "story init <小说文件路径> [--book 书名] [--user-chapter N]   初始化项目并导入整本小说（初始化必须有小说内容；更换小说 = 用新文件重跑 init）",
   },
   build: {
     run: async (args) => {
       const { cmdBuild } = await import("./commands/build.js");
       return cmdBuild(args.flags, args.positional);
     },
-    help: "story build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--no-agent] [--keep-going] [--provider openai|mock] [--retries N]  抽取结构化数据（默认构建已导入未构建的全部章节；--to N 为本次构建任务结束章节）",
+    help: "story build [--from N] [--to N] [--force] [--batch-size N] [--auto-batch] [--keep-going] [--retries N]  抽取结构化数据（Agent 化抽取，默认构建已导入未构建的全部章节；--to N 为本次构建任务结束章节）",
   },
   review: {
     run: async (args) => {
@@ -78,7 +70,7 @@ const commands: Record<string, CommandEntry> = {
       if (!args.positional.length) throw new Error("用法：story ask <问题>");
       return cmdAsk(args.positional.join(" "), args.flags);
     },
-    help: "story ask <问题> [--chapter N] [--provider openai|mock]   基于结构化数据回答（人物卡片/无剧透问答；--chapter 临时覆盖阅读进度）",
+    help: "story ask <问题> [--chapter N]   基于结构化数据回答（人物卡片/无剧透问答；--chapter 临时覆盖阅读进度）",
   },
   stats: {
     run: async () => {
@@ -99,7 +91,14 @@ const commands: Record<string, CommandEntry> = {
       const { cmdTui } = await import("./commands/tui.js");
       return cmdTui(args.flags);
     },
-    help: "story tui [--provider openai|mock]   交互式小说问答界面（TUI，支持 / 斜杠命令：/help /status /settings /login /logout /chapter /build /import /review /audit /clear /exit；未初始化时会询问是否初始化）",
+    help: "story tui   交互式小说问答界面（TUI，输入 / 可查看全部斜杠命令：status / settings / login / logout / chapter / build / import / review / audit / clear / exit；未初始化时会询问是否初始化；未配置 LLM 时可进入后用 /login 配置）",
+  },
+  web: {
+    run: async (args) => {
+      const { cmdWeb } = await import("./commands/web.js");
+      return cmdWeb(args.flags);
+    },
+    help: "story web [--port N] [--host H] [--quiet]   启动本地小说百科网站（只读结构化知识；阅读进度过滤防剧透，不展示正文；Ctrl+C 停止）",
   },
 };
 
@@ -111,7 +110,7 @@ function helpText(): string {
     ...Object.values(commands).map((c) => `  ${c.help}`),
     "",
     "全局 flag：",
-    "  --provider openai|mock    LLM 提供商（默认：有 LLM 环境变量时 openai，否则 mock）",
+    "  （无；LLM 连接由环境变量或 .story/config.json 的 llm.* 决定，可在 TUI 内用 /login 配置）",
     "",
     "环境变量或项目根 .env 文件（用于真实 LLM）：",
     "  LLM_BASE_URL    OpenAI-compatible 端点",
@@ -120,11 +119,11 @@ function helpText(): string {
     "  （真实环境变量优先于 .env 文件）",
     "",
     "更多信息与验证用例：",
-    "  story init --book 我不是戏神",
-    "  story import <小说文件>",
+    "  story init --book 我不是戏神 <小说文件>",
     "  story build",
     "  story ask 闻人佑是谁来着？ --chapter 405",
     "  story audit --chapter 405",
+    "  story web   # 本地小说百科网站（阅读进度过滤防剧透）",
   ];
   return lines.join("\n");
 }
