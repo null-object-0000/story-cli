@@ -74,7 +74,14 @@ const systemPrompt = `${EXTRACTION_SYSTEM_PROMPT}
   // 校验失败重试：把具体错误 + 定向提示注入本次输出（buildFixInstruction 与 pipeline 校验共用）
   const fixBlock = input.feedback ? buildFixInstruction(input.feedback) + "\n\n" : "";
 
-  const userMessage = `${fixBlock}## 此前剧情摘要（供上下文理解，来自上一批抽取）
+  // 上一次输出回传（ValidationError 重试）：让模型在上次基础上【只修被点名记录】，其余内容保持一致——
+  // 避免重试从头重生成整份 JSON 而把其他本来正确的记录改坏（打地鼠问题的根治）。
+  // 必须强调"完整写出"：模型容易把未修改的记录省略成 [...]/「同上」占位，导致整份不是合法 JSON。
+  const previousBlock = input.previousOutput
+    ? `\n## 你上一次的完整输出（除校验器点名的记录外，其余内容均正确）\n请【只修改校验器点名的记录】，其余记录的内容保持正确、不要改坏。\n【硬性】必须输出【完整】的 JSON：每条记录（包括未修改的记录）都要把实际内容完整写出，绝对禁止用 [...]、{...}、"同上/同前/其余不变/same as above" 等省略或占位写法代替任何记录——校验器会解析整份 JSON。\n上次输出：\n${input.previousOutput}\n\n`
+    : "";
+
+  const userMessage = `${fixBlock}${previousBlock}## 此前剧情摘要（供上下文理解，来自上一批抽取）
 ${input.previousSummary || "（无）"}
 
 ## 待抽取章节（第 ${input.startChapter}~${input.endChapter} 章）

@@ -59,6 +59,13 @@ export interface ExtractionInput {
    * 首次调用时为空字符串/undefined。
    */
   feedback?: string;
+  /**
+   * 上一次尝试的完整输出 JSON（ValidationError 重试时回传）。
+   * 让模型在"上一次输出"基础上【只修改被点名的记录】、其余保持逐字不变，
+   * 避免每次重试都从头重新生成整份 JSON 而把其他本来正确的记录改坏（打地鼠问题）。
+   * 仅校验失败（ValidationError）时回传；JSON 解析失败/截断时不下发（上次输出不可用）。
+   */
+  previousOutput?: string;
 }
 
 export interface LlmCapabilities {

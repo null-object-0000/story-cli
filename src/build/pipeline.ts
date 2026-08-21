@@ -340,6 +340,9 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
     let lastError = "";
     // 校验失败的反馈：回填给下一次尝试，让重试"会修"而不是盲目重跑同一 prompt
     let feedback = "";
+    /** 上一次尝试的完整输出（ValidationError 重试时回传给模型，让它只修被点名记录、其余逐字不动——
+     *  避免重试从头重生成整份 JSON 而改坏其他本来正确的记录，这是"打地鼠"问题的根治）。 */
+    let previousOutput: string | undefined;
     let usage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
     /** 本次尝试的原始输出（校验失败时用于点名定位非法条目，构建更有针对性的反馈） */
     let rawOutput: unknown = null;
@@ -352,7 +355,7 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         await sleep(500 * attempt);
       }
       try {
-        const res = await agentExtract(provider, repo, { ...input, feedback }, {
+        const res = await agentExtract(provider, repo, { ...input, feedback, previousOutput }, {
           onActivity: (line) => {
             statusLine = line;
             emitProgress(key, "running", zeroResult(key, "done"), statusLine);
@@ -396,6 +399,10 @@ export async function runBuild(repo: StoryRepo, provider: LlmProvider, opts: Bui
         feedback = e instanceof ValidationError
           ? buildValidationFeedback(rawOutput, lastError)
           : (lastError.includes("无法解析为 JSON") || lastError.includes("被截断") ? lastError : "");
+        // 仅校验失败回传上一次输出（可用的完整 JSON）；解析失败/截断时上次输出不可用，不下发
+        previousOutput = e instanceof ValidationError && rawOutput !== null && typeof rawOutput === "object"
+          ? JSON.stringify(rawOutput)
+          : undefined;
         if (attempt >= retries) break;
       }
     }

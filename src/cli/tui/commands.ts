@@ -334,6 +334,8 @@ export async function runSlashCommand(input: string, ctx: CommandContext): Promi
             concurrency: 1,
             autoBatch: flags["--auto-batch"] === true || (flags["--batch-size"] !== undefined ? false : (cfg.build?.autoBatch ?? true)),
             failFast: !(flags["--keep-going"] === true),
+            // 与 CLI 对齐：重试次数读 config.build.retries（/settings 可改），否则 TUI /build 永远用默认 2
+            retries: cfg.build?.retries,
             sessionLog: cfg.build?.sessionLog ?? true,
             maxBatchChapters: cfg.build?.maxBatchChapters,
             perChapterOutputTokens: cfg.build?.perChapterOutputTokens,

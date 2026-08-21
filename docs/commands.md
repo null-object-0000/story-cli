@@ -114,6 +114,7 @@ Build 只走 Agent 化抽取（注入式已移除）。与 Ask 的 Reader Agent 
   - `search_existing_entities`：批量检索知识库已有实体，一次可传 ≤40 个名字，返回命中实体的 `id/name/type/别名` + **`facts`/`anchors` 数量**（≤100 条；数据密度让模型判断稀疏实体是否该补充 MemoryAnchor）。目的：让模型复用已建实体，避免重复建实体；返回的 `name` 是 canonical name，最终 JSON 引用时必须用它（不能用文本里的别名再建实体）。
   - `search_chapter_evidence`：在**当前 Batch 章节原文**中检索某个原文短语，返回它出现在哪些章节及上下文片段（参数 `query`）。用途：输出最终 JSON 前确认某条知识的 `evidence`（原文短引）到底在哪一章，从而正确填写 Reveal Chapter。只搜当前 Batch 原文，Reader 永远不会使用。
 - **无工具调用上限**：单批内模型可自由调工具，靠上下文窗口自然收敛；超长循环由 build session-log 观测（`.story/logs/build/`）。
+- **抽取思考强度由 `config.llm.extractReasoning` 控制（默认 off）**：`src/llm/openai.ts` 的 `getAgentKit` 把 `extractReasoning` 显式写进 stream opts（Agent 默认只传 `reasoning: undefined`，对 DeepSeek 系推理模型等于没关思考——推理前言会泄漏进 JSON 输出、并吃掉输出预算导致截断）；显式 `"off"` 才真正发 `thinking:{type:"disabled"}`。`extractJson`（`openai.ts`）现在用"逐 `{` 配平找最外层完整 JSON"的兜底提取，推理前言/杂质里混入花括号也不影响定位。
 - 模型最终输出必须是一个 JSON 对象（9 个数组：`newEntities / aliases / facts / relations / abilities / events / memoryAnchors / possibleDuplicates / conflicts` + `batchSummary`）。**所有 temporal 记录（aliases/facts/relations/abilities/events/memoryAnchors/newEntities）都要带 `evidence`（该章原文短引）**。输出无法解析为 JSON → 抛错交 pipeline 重试。
 - **MemoryAnchor 是一等目标（P0：Character Recall）**：系统提示词（`build/prompts.ts` 的 `EXTRACTION_SYSTEM_PROMPT`）把 MemoryAnchor 重新定义为——"用户未来忘记人物名字后，可能会拿来描述这个人物、并借此重新定位他的具体记忆线索"（不是"重要剧情摘要/高重要度事件"），优先级不低于普通 Fact；并明确区分两个维度：`importance`（剧情重要度）与 `memorability`（记忆识别度）。同一提示词内包含 **Character Recall Sweep**：输出前对当前批次每个重要角色逐个检查（外貌/身体特征、典型行为、重复习惯、日常职责、说话方式、主角初见画面、具体互动、反复出现的物品/动作/场景、"读者忘记名字后最可能用什么模糊描述找他"），有高识别度线索就产出 MemoryAnchor——不因"准确率优先/只抽重要信息/控制输出长度"而过滤外貌、日常行为、习惯、典型动作、说话方式、日常职责等。
 - `memoryAnchors` 条目带 `kind`（轻量枚举）：`visual`（外貌/视觉画面）、`behavior`（典型行为/动作）、`habit`（习惯/重复特征）、`interaction`（与主角或重要角色的典型互动）、`role`（日常职责/团队定位）、`quote`（说话方式/口头特征）。旧输出无 `kind` 时校验器兼容为 `null`；给出非法值则整批校验失败。summary 允许略长（≤30 字）以保留"用户可能用来回忆的原话感"（如「高大沉默的三师兄，一路拉着装满戏台道具的板车」）。
@@ -143,7 +144,9 @@ repo.db.exec("COMMIT")   # 任一步异常 → ROLLBACK，批次记 failed
 - 校验失败 → `buildValidationFeedback(raw, error)` **点名**非法条目（如"请从 newEntities 中删除：杀戮舞曲"）→ 作为 `input.feedback` 传入下一次抽取；
 - 下次 prompt 经 `buildFixInstruction(feedback)`（`build/prompts.ts`）注入"校验器原文 + 定向提示"；
 - **Evidence 失败也回填 feedback**：如"事实实体「闻人佑」…声明 chapter=384，但 evidence「平日里都是老三做饭」在第384章原文中不存在" → 定向提示让模型用 `search_chapter_evidence` 确认章节并换用该章真实 evidence；错误信息还会带上**自动诊断**（`validation.ts` 的 `diagnoseEvidenceMismatch`）：若 evidence 的片段虽都出现在该章、但彼此不连续（模型把该章两处/两句的片段"静默拼接"，即使不写省略号）→ 明确提示改为抄写【单独一句】中连续出现的原文；若该章完全找不到 → 提示 evidence 可能是总结/改写/编造或 chapter 填错；
-- **JSON 解析失败 / 输出截断也回填 feedback**（`pipeline.ts`）：模型输出无法解析（常见：混入解释文字、代码块围栏、**中文全角逗号/冒号当结构标点**）或达到输出上限被截断（模型"思考叙述"吃预算）时，`buildFixInstruction` 给出对应定向提示（禁前言文字 / 半角标点 / 精简输出），让重试真正会修。
+- **Evidence 错误一次性收集（打地鼠根治之一）**：`validateExtractionOutput` 不再"遇到第一条 evidence 错误就抛"——它把本批**全部** evidence 错误收集进 `errors[]`，最后 `errors.join("\n\n")` 一次性抛给反馈循环。这样一轮重试就能修完所有错误，而不是"一次只修一条、下一轮才暴露下一条"（21 章大批次常有 5~10 条 evidence 错误，逐个修会耗尽重试次数）。结构错误（缺 name/type/value、type 非法、chapter 越界、confidence 非法、kind 非法等）仍即时抛（其中 `newEntities.type` 由 `buildValidationFeedback` 扫描原始输出一次点名所有非法条目）；
+- **重试把上一次输出回传给模型（打地鼠根治）**：ValidationError 重试时，pipeline 把上次尝试的完整输出 JSON 一并下发（`ExtractionInput.previousOutput`），prompt 明确要求模型**只修改被点名的记录、其余逐字不动**——避免每次重试都从头重新生成整份 JSON、把其他本来正确的记录改坏（例如第 1 次尝试 evidence 已正确、重试后反而被改坏）。JSON 解析失败/截断时上次输出不可用，不下发；
+- **JSON 解析失败 / 输出截断也回填 feedback**（`pipeline.ts`）：模型输出无法解析（常见：JSON 前后混入解释/思考/推理文字、**中文全角逗号/冒号当结构标点**、用 `[...]`/`{...}`/「同上」等省略占位代替未修改记录）或达到输出上限被截断（模型"思考叙述"吃预算）时，`buildFixInstruction` 给出对应定向提示（禁前言文字 / 半角标点 / 禁省略占位 / 精简输出），让重试真正会修。
 - **代码绝不静默改写/丢弃模型输出**（这是与"宽容修复"方案明确区分的设计决定）；若重试耗尽仍失败 → 批次响亮失败并记录原因。
 - 校验硬规则示例：`newEntities.type` 只允许 `character|organization|location|item|concept`，能力/技能禁止作为实体类型（能力走 `abilities` 数组）。
 
@@ -291,7 +294,7 @@ answerQuestion({ repo, cfg, provider, mode, question })   # reader/answer.ts
 - `case "build"`（`src/cli/tui/commands.ts`）打开 `openBuildView`（`menus.ts`）构建面板，把输入区替换为面板：进度条/百分比、失败批次数、实时 token 消耗 + ETA、当前批次运行日志实时渲染；**构建中不能干别的，Esc 取消**（pipeline `runBuild` 新增 `signal` 选项，批间检查、当前批结束后停止），完成后 Esc 返回。
 - **进度条长度随面板/终端宽度自适应**（`BuildPanelHandle.width()`），并实时显示本次构建累计 token 消耗（`buildMetrics("extract")` 快照差量）。
 - 面板复用原有进度与汇总 markdown 格式化；`/build` 属 UI 命令（`UI_COMMANDS`），`CommandResult.noEcho=true`，**聊天区零痕迹**（无回显、无「执行中…」）；**结束后面板显示简洁版结果（避免长表格溢出），完整批次明细经 `ctx.onNotify` 输出到聊天区**（聊天区可滚动查看，关闭面板后仍有记录）。
-- `/build` 各 flag（`--from/--to/--force/--batch-size/--auto-batch/--keep-going`）与配置组 `build.*` 的语义不变。
+- `/build` 各 flag（`--from/--to/--force/--batch-size/--auto-batch/--keep-going`）与配置组 `build.*` 的语义不变（`build.retries` 同样生效：`/settings` 改 `build.retries` 即改 `/build` 重试次数，与 CLI `story build` 一致）。
 
 ### 实时生效说明
 - `reader.userChapter`、`build.*`：本身就被 `/ask` `/build` 等实时读取，改动即时生效。

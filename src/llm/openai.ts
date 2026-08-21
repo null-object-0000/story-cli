@@ -254,10 +254,19 @@ export class PiAiProvider implements LlmProvider {
   /** Agent 能力：暴露 pi-ai 的 model 与 stream 函数，供 pi-agent-core 的 Agent 循环使用 */
   getAgentKit(): { model: unknown; streamFn: unknown } {
     const { models, model } = this.ensure();
+    // 抽取时按 config.llm.extractReasoning 控制思考强度（默认 off）：
+    // 必须把 reasoning 显式写进 stream opts。Agent 默认 thinkingLevel="off" 时只传 reasoning: undefined，
+    // 对 DeepSeek 系推理模型（flowlet 等）等于没关思考——推理前言会泄漏进 JSON 输出
+    // （既让 extractJson 解析失败，又把输出预算吃光导致截断）。显式 "off" 才会发 thinking:{type:"disabled"}。
+    const reasoning = this.extractReasoning; // "off" | "low" | "medium" | "high"
     return {
       model,
       streamFn: (m: unknown, context: unknown, opts?: Record<string, unknown>) =>
-        (models.streamSimple as (model: unknown, context: unknown, opts?: Record<string, unknown>) => AsyncIterable<unknown>)(m, context, opts),
+        (models.streamSimple as (model: unknown, context: unknown, opts?: Record<string, unknown>) => AsyncIterable<unknown>)(
+          m,
+          context,
+          { ...(opts ?? {}), reasoning }
+        ),
     };
   }
 }
@@ -292,7 +301,9 @@ function contentBlocks(blocks: { type: string; text?: string }[]): string {
   return (blocks ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
 }
 
-/** 从模型输出中提取 JSON（容忍 markdown 代码块、前后杂质） */
+/** 从模型输出中提取 JSON（容忍 markdown 代码块、前后杂质）。
+ *  失败时优先从【最后一个】"{" 开始向后扫描配对 "}"，逐个候选尝试 JSON.parse——
+ *  推理前言/解释文字里若混入了花括号（如「{...}」占位示例），旧的"取第一个 { 到最后一个 }"会提取错。 */
 export function extractJson(text: string): unknown | null {
   const t = (text ?? "").trim();
   if (!t) return null;
@@ -301,15 +312,45 @@ export function extractJson(text: string): unknown | null {
   try {
     return JSON.parse(candidate);
   } catch {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    if (start >= 0 && end > start) {
+    // 收集所有 "{" 位置，从前往后找第一个能解析出【完整】JSON 对象的候选——
+    // 推理前言/解释文字里混入的花括号占位（如 "{...}"）通常解析失败会被跳过，
+    // 从而定位到真正的 JSON（最外层对象）；旧的"取第一个 { 到最后一个 }"在杂质含花括号时提取错。
+    const starts: number[] = [];
+    for (let i = 0; i < candidate.length; i++) {
+      if (candidate[i] === "{") starts.push(i);
+    }
+    for (let k = 0; k < starts.length; k++) {
+      const end = matchJsonObjectEnd(candidate, starts[k]);
+      if (end === -1) continue;
       try {
-        return JSON.parse(candidate.slice(start, end + 1));
+        return JSON.parse(candidate.slice(starts[k], end + 1));
       } catch {
-        return null;
+        // 该候选不可解析，继续试下一个 "{"（可能是前言里的伪 JSON/缩写占位）
       }
     }
     return null;
   }
+}
+
+/** 从 open 位置向后找配对的 "}"（跳过字符串字面量与嵌套对象/数组）；找不到返回 -1 */
+function matchJsonObjectEnd(text: string, open: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
