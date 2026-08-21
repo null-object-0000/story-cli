@@ -124,6 +124,28 @@ export function evidenceInChapter(evidence: string, chapterText: string | undefi
   return normalizeEvidenceText(chapterText).includes(e);
 }
 
+/**
+ * 为 evidence 校验失败做【定向诊断】（只用于增强错误反馈，不影响通过/失败判定）：
+ *  - "splice"   ：evidence 拆开后，两段都单独出现在该章原文，但彼此不连续（中间隔着其他文字）——
+ *                 典型是模型把同一章相邻/不相邻两句的片段"静默拼接"（不一定写省略号）成一句话。
+ *  - "notfound" ：evidence 的文字在该章完全找不到连续或分散的成分——更可能是总结/改写/编造，或 chapter 填错。
+ * 启发式：找"能作为整段出现在原文中的最长前缀"，剩余部分若也单独能在原文中找到且两段都不算太短 → splice。
+ * 只命中失败路径（校验失败本就少见），evidence ≤25 字，O(n²) 可忽略。
+ */
+export function diagnoseEvidenceMismatch(evidence: string, chapterText: string | undefined): "splice" | "notfound" {
+  const ne = normalizeEvidenceText(evidence);
+  const nt = normalizeEvidenceText(chapterText ?? "");
+  if (!ne || !nt) return "notfound";
+  let prefixLen = 0;
+  for (let i = 1; i <= ne.length; i++) {
+    if (nt.includes(ne.slice(0, i))) prefixLen = i;
+    else break;
+  }
+  const rest = ne.slice(prefixLen);
+  if (prefixLen >= 2 && rest.length >= 2 && nt.includes(rest)) return "splice";
+  return "notfound";
+}
+
 /** 校验单条 temporal record 的 evidence：
  *  - chapterTexts 提供时（真实 Build）：
  *    · required 类型（facts/relations/memoryAnchors/aliases/abilities）：必须给出 evidence，且必须存在于声明章节原文；缺或错 → 抛错。
@@ -162,8 +184,14 @@ function checkEvidence(
       );
       return;
     }
+    const diag = diagnoseEvidenceMismatch(ev, text);
+    const diagLine =
+      diag === "splice"
+        ? `诊断：evidence 的片段虽都出现在第${record.chapter}章，但彼此不连续（中间隔着原文其他内容）——它像是把该章两处/两句的片段拼接到了一起。请改为【逐字照抄】该章【单独一句】中连续出现的原文片段（≤25 字），不要跨句/跨片段拼接（即使不写省略号）。`
+        : `诊断：第${record.chapter}章原文中似乎找不到 evidence 里的文字——evidence 可能是总结/改写或编造，或 chapter 填错。请改用第${record.chapter}章真实原文中连续出现的短句。`;
     throw new ValidationError(
       `${record.kindLabel}${record.identify} 声明 chapter=${record.chapter}，但 evidence「${ev}」在第${record.chapter}章原文中不存在（normalize 后未匹配）。\n` +
+        `${diagLine}\n` +
         `请重新确认该信息首次被读者得知的章节，并提供该章真实原文 evidence（短引用，来自当前 Batch）。`
     );
   }

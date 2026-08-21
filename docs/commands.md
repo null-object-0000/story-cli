@@ -142,14 +142,14 @@ repo.db.exec("COMMIT")   # 任一步异常 → ROLLBACK，批次记 failed
 ### 修复机制（设计原则：数据修正权在 LLM，代码不静默改写）
 - 校验失败 → `buildValidationFeedback(raw, error)` **点名**非法条目（如"请从 newEntities 中删除：杀戮舞曲"）→ 作为 `input.feedback` 传入下一次抽取；
 - 下次 prompt 经 `buildFixInstruction(feedback)`（`build/prompts.ts`）注入"校验器原文 + 定向提示"；
-- **Evidence 失败也回填 feedback**：如"事实实体「闻人佑」…声明 chapter=384，但 evidence「平日里都是老三做饭」在第384章原文中不存在" → 定向提示让模型用 `search_chapter_evidence` 确认章节并换用该章真实 evidence；
+- **Evidence 失败也回填 feedback**：如"事实实体「闻人佑」…声明 chapter=384，但 evidence「平日里都是老三做饭」在第384章原文中不存在" → 定向提示让模型用 `search_chapter_evidence` 确认章节并换用该章真实 evidence；错误信息还会带上**自动诊断**（`validation.ts` 的 `diagnoseEvidenceMismatch`）：若 evidence 的片段虽都出现在该章、但彼此不连续（模型把该章两处/两句的片段"静默拼接"，即使不写省略号）→ 明确提示改为抄写【单独一句】中连续出现的原文；若该章完全找不到 → 提示 evidence 可能是总结/改写/编造或 chapter 填错；
 - **JSON 解析失败 / 输出截断也回填 feedback**（`pipeline.ts`）：模型输出无法解析（常见：混入解释文字、代码块围栏、**中文全角逗号/冒号当结构标点**）或达到输出上限被截断（模型"思考叙述"吃预算）时，`buildFixInstruction` 给出对应定向提示（禁前言文字 / 半角标点 / 精简输出），让重试真正会修。
 - **代码绝不静默改写/丢弃模型输出**（这是与"宽容修复"方案明确区分的设计决定）；若重试耗尽仍失败 → 批次响亮失败并记录原因。
 - 校验硬规则示例：`newEntities.type` 只允许 `character|organization|location|item|concept`，能力/技能禁止作为实体类型（能力走 `abilities` 数组）。
 
 ### Evidence Grounding / Provenance（P0：Reveal Chapter 归因）
 - **问题**：旧 Build 里 LLM 正确理解"闻人佑负责做饭"，却把 chapter 填成 384（原文实际 396/397）、拉板车填成 391（原文 392）。Validator 只查 `start<=chapter<=end`，拦不住这种 **Temporal Attribution Error**。
-- **方案**：`chapter/fromChapter/firstSeenChapter` 不再是"LLM 凭记忆填的数字"，而是必须带 `evidence`（该章原文短引），由 `validateExtractionOutput` 用**当前 Batch 章节原文**做确定性验证：`normalizeEvidenceText(chapterText).includes(normalizeEvidenceText(evidence))`。校验失败 → 反馈回 LLM 修正（不静默改 chapter）。
+- **方案**：`chapter/fromChapter/firstSeenChapter` 不再是"LLM 凭记忆填的数字"，而是必须带 `evidence`（该章原文短引），由 `validateExtractionOutput` 用**当前 Batch 章节原文**做确定性验证：`normalizeEvidenceText(chapterText).includes(normalizeEvidenceText(evidence))`。校验失败 → 反馈回 LLM 修正（不静默改 chapter）。反馈会带**拼接/未找到诊断**（`diagnoseEvidenceMismatch`）：片段在该章出现但不连续 → 提示跨句拼接需改为单句连续原文；完全找不到 → 提示总结/改写/编造或章节号填错。
 - **normalize 规则**（`validation.ts`）：NFKC（全角→半角）→ 移除所有标点/符号 → 移除所有空白（含换行）→ 小写 → substring。不做 embedding/模糊语义验证。
 - **最早证据**：同一 evidence 若在本 Batch 更早章节也出现，产生**非致命 warning**（提示 chapter 可能不是最早 Reveal Chapter，建议改用更早章节 evidence），不失败。
 - **evidence 是否持久化**：**否**。evidence 是原文片段，只存在于 Build 数据流（内存校验），**不写入 Story DB、不进任何 Reader-facing API**——这是"Reader 永远不能访问小说原文"硬约束的结构性保证（web `/api/entity` 全行序列化也不会泄漏）。可观测性：mainline 每批记录 `evidenceValidated`（带 evidence 记录数）与 `evidenceWarnings`。

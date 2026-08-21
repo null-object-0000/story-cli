@@ -170,7 +170,7 @@ export function buildFixInstruction(feedback: string): string {
     : feedback.includes("缺少 evidence")
       ? "\n- 校验器要求每条 temporal 记录（aliases/facts/relations/abilities/memoryAnchors）都必须提供 evidence：来自该章原文的短引用（≤ 25 字）。请给被点名的条目补上 evidence，并把 chapter 设为该 evidence 真正出现的章节。"
       : feedback.includes("原文中不存在")
-        ? "\n- 被点名的 evidence 在你声明的 chapter 原文里找不到。原因通常是：① evidence 是总结/改写而非原文原句；② 用省略号把不相邻的句子拼接；③ 章节号填错。请改为【逐字照抄】该章原文的一句话（不要总结、不要用省略号拼接、不要改写），并确认 chapter 就是这句话所在章节；可调用 search_chapter_evidence 检索确认。"
+        ? "\n- 被点名的 evidence 在你声明的 chapter 原文里找不到。原因通常是：① evidence 是总结/改写而非原文原句；② 把该章两处/两句的片段拼接到一起（即使两段都出现在该章、即使没写省略号，只要 normalize 后不是连续出现就通不过）；③ 章节号填错。请改为【逐字照抄】该章原文中【单独一句、连续出现】的短片段（不要总结、不要拼接、不要改写），并确认 chapter 就是这句话所在章节；可调用 search_chapter_evidence 检索确认。"
         : feedback.includes("被截断")
           ? "\n- 上次输出超过长度上限被截断。请【大幅精简】：只输出 JSON 对象本身，禁止任何解释/思考/检索过程描述（中英文都不行），summary/value/detail 用最简表达，不重复已知信息。"
           : feedback.includes("无法解析为 JSON")
